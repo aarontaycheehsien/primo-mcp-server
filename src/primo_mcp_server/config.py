@@ -40,3 +40,9 @@ class PrimoConfig(BaseSettings):
     # "expanded" and includes records with no access. False is the safer
     # default for holdings-confirmation queries.
     include_unavailable: bool = False
+
+    # Optional external JSON directory used for librarian recommendations.
+    # No real profile data is bundled; local installs opt in by setting this.
+    librarians_file: str | None = None
+    inline_librarian_recommendations: bool = True
+    librarian_min_score: float = 5.0

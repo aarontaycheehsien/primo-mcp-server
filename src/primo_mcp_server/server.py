@@ -15,6 +15,11 @@ from primo_mcp_server.formatter import (
     format_search_results,
     format_suggestions,
 )
+from primo_mcp_server.librarians import (
+    format_librarian_recommendations,
+    load_librarian_directory,
+    recommend_librarians as rank_librarians,
+)
 
 
 @asynccontextmanager
@@ -47,8 +52,11 @@ mcp = FastMCP(
         "do not use websites, LibGuides, or general web pages unless the "
         "user explicitly asks for web confirmation. "
         "Use primo_search for queries, primo_get_record for full details, "
-        "primo_suggest for autocomplete, primo_cite for citations, "
-        "and primo_export for BibTeX/RIS/CSV export."
+        "primo_suggest for autocomplete, primo_recommend_librarians for "
+        "validated librarian recommendations, primo_cite for citations, "
+        "and primo_export for BibTeX/RIS/CSV export. Librarian "
+        "recommendations are limited to configured profile IDs; do not "
+        "invent or substitute names."
     ),
     lifespan=app_lifespan,
 )
@@ -62,6 +70,32 @@ def _get_client(ctx: Context) -> PrimoClient:
 def _get_config(ctx: Context) -> PrimoConfig:
     """Extract the PrimoConfig from the lifespan context."""
     return ctx.request_context.lifespan_context["config"]
+
+
+def _format_recommendations_for_records(
+    config: PrimoConfig,
+    query: str,
+    records,
+    *,
+    limit: int = 2,
+) -> str:
+    """Load configured profiles and format validated recommendations."""
+    directory, message = load_librarian_directory(config.librarians_file)
+    if message or directory is None:
+        return format_librarian_recommendations(
+            [],
+            query,
+            configuration_message=message,
+        )
+
+    matches = rank_librarians(
+        directory,
+        query,
+        records,
+        limit=limit,
+        min_score=config.librarian_min_score,
+    )
+    return format_librarian_recommendations(matches, query)
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +116,8 @@ async def primo_search(
     date_to: str | None = None,
     peer_reviewed: bool | None = None,
     include_unavailable: bool | None = None,
+    recommend_librarians: bool = True,
+    librarian_limit: int = 2,
 ) -> str:
     """Search Singapore Management University Library via Primo.
 
@@ -115,9 +151,17 @@ async def primo_search(
             confirmation requires. Only set true when the user explicitly
             wants to discover material beyond the library's collection,
             e.g. for interlibrary loan or comprehensive literature mapping.
+        recommend_librarians: Set to false to suppress inline librarian
+            recommendations for this search. Inline recommendations also
+            require PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS=true. When shown,
+            callers should include the bottom "Recommended librarian help:" section
+            when summarising Primo results.
+        librarian_limit: Number of librarian recommendations to include
+            inline. Defaults to 2 and is capped at 3.
 
     Returns:
-        Formatted search results with title, authors, year, identifiers, and availability.
+        Formatted search results with title, authors, year, identifiers,
+        availability, and any bottom "Recommended librarian help:" section.
     """
     try:
         client = _get_client(ctx)
@@ -135,7 +179,7 @@ async def primo_search(
             peer_reviewed=peer_reviewed,
             include_unavailable=include_unavailable,
         )
-        return format_search_results(
+        result = format_search_results(
             response,
             query,
             offset,
@@ -149,6 +193,14 @@ async def primo_search(
             peer_reviewed=peer_reviewed,
             include_unavailable=include_unavailable,
         )
+        if recommend_librarians and config.inline_librarian_recommendations:
+            result += "\n\n" + _format_recommendations_for_records(
+                config,
+                query,
+                response.records,
+                limit=librarian_limit,
+            )
+        return result
     except PrimoAPIError as e:
         return f"Error searching Primo: {e}"
     except Exception as e:
@@ -217,7 +269,92 @@ async def primo_suggest(ctx: Context, query: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool 4: primo_cite
+# Tool 4: primo_recommend_librarians
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def primo_recommend_librarians(
+    ctx: Context,
+    query: str,
+    record_ids: list[str] | None = None,
+    field: str = "any",
+    scope: str = "everything",
+    sort_by: str = "rank",
+    offset: int = 0,
+    search_limit: int = 5,
+    resource_type: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    peer_reviewed: bool | None = None,
+    include_unavailable: bool | None = None,
+    limit: int = 2,
+) -> str:
+    """Recommend configured SMU librarian help for a Primo query or records.
+
+    Recommendations are validated against the configured JSON profile
+    directory. The server returns only configured librarian names; callers
+    must not invent or substitute librarian recommendations. Callers should
+    include the "Recommended librarian help:" section when summarising results.
+
+    Args:
+        query: User research topic or Primo search query.
+        record_ids: Optional Primo record IDs to use as metadata evidence.
+            When omitted, a small Primo search is run for context.
+        field: Search field used when record_ids are omitted.
+        scope: Search scope used when record_ids are omitted.
+        sort_by: Sort order used when record_ids are omitted.
+        offset: Search offset used when record_ids are omitted.
+        search_limit: Number of Primo records to inspect when searching.
+            Defaults to 5 and is capped by the Primo client.
+        resource_type: Optional Primo resource type filter.
+        date_from: Optional start year filter in YYYY format.
+        date_to: Optional end year filter in YYYY format.
+        peer_reviewed: Set to true to inspect only peer-reviewed items.
+        include_unavailable: Set to true to include CDI records without full
+            text access when searching for context.
+        limit: Number of recommendations to return. Defaults to 2 and is
+            capped at 3.
+
+    Returns:
+        Validated librarian recommendations, configuration guidance, or a
+        no-recommendation message when matches are weak.
+    """
+    try:
+        client = _get_client(ctx)
+        config = _get_config(ctx)
+
+        if record_ids:
+            records = await client.get_records(record_ids)
+        else:
+            response = await client.search(
+                query=query,
+                field=field,
+                scope=scope,
+                sort_by=sort_by,
+                limit=search_limit,
+                offset=offset,
+                resource_type=resource_type,
+                date_from=date_from,
+                date_to=date_to,
+                peer_reviewed=peer_reviewed,
+                include_unavailable=include_unavailable,
+            )
+            records = response.records
+
+        return _format_recommendations_for_records(
+            config,
+            query,
+            records,
+            limit=limit,
+        )
+    except PrimoAPIError as e:
+        return f"Error recommending librarians: {e}"
+    except Exception as e:
+        return f"Unexpected error: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Tool 5: primo_cite
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
@@ -263,7 +400,7 @@ async def primo_cite(
 
 
 # ---------------------------------------------------------------------------
-# Tool 5: primo_export
+# Tool 6: primo_export
 # ---------------------------------------------------------------------------
 
 @mcp.tool()

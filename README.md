@@ -16,6 +16,7 @@ and Unicode-safe handling for Chinese records.
 - Generate citations in APA 7th, Harvard, Chicago, IEEE, and Vancouver styles
 - Export records to BibTeX, RIS, or UTF-8-sig CSV
 - Reject invalid search scopes instead of silently falling back to Everything
+- Recommend configured SMU librarians from search queries and Primo metadata
 
 ## Quick Start for SMU
 
@@ -57,6 +58,7 @@ pytest tests/ -v
 | `primo_search` | Search Primo with field, scope, type, date, and peer-review filters |
 | `primo_get_record` | Get full details for a record by Primo record ID |
 | `primo_suggest` | Get autocomplete suggestions |
+| `primo_recommend_librarians` | Recommend configured librarian help for a query or selected records |
 | `primo_cite` | Generate formatted citations |
 | `primo_export` | Export records as BibTeX, RIS, or CSV |
 
@@ -100,6 +102,9 @@ PRIMO_LANGUAGE=en
 PRIMO_REQUEST_TIMEOUT=30.0
 PRIMO_MAX_RESULTS_PER_REQUEST=50
 PRIMO_DEFAULT_RESULTS=10
+PRIMO_LIBRARIANS_FILE=C:\path\to\smu-librarians.json
+PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS=true
+PRIMO_LIBRARIAN_MIN_SCORE=5.0
 ```
 
 ## Configuration Reference
@@ -125,8 +130,59 @@ environment variables:
 | `PRIMO_DEFAULT_RESULTS` | `10` | Default results per search |
 | `PRIMO_LANGUAGE` | `en` | Primo language parameter |
 | `PRIMO_INCLUDE_UNAVAILABLE` | `false` | Include CDI records without full text access in search results |
+| `PRIMO_LIBRARIANS_FILE` | unset | External JSON librarian directory used for recommendations |
+| `PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS` | `true` | Append a bottom `Recommended librarian help:` section to `primo_search` output |
+| `PRIMO_LIBRARIAN_MIN_SCORE` | `5.0` | Minimum deterministic match score required before showing a recommendation |
 
 See `.env.example` for a commented template.
+
+When `PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS=true` and a configured profile
+meets the score threshold, `primo_search` appends a bottom Markdown section
+headed `## Recommended librarian help:`. Callers should preserve this section when
+summarising Primo results.
+
+The recommendation display uses a fixed labelled format for each matched
+profile:
+
+```text
+## Recommended librarian help:
+
+Status: matched
+1. Name: [Accounting Librarian](https://library.smu.edu.sg/example-profile)
+   Title: Business Research Librarian
+   Contact: accounting@example.edu
+   Best for: Consult for accounting datasets, WRDS, and Compustat.
+   Evidence: matched terms: accounting; evidence fields: query
+Recommendations are limited to configured librarian profiles; do not invent or substitute names.
+```
+
+The `Name` value is always emitted as a Markdown link. The profile `url` is
+used first; if it is missing, the formatter falls back to a `mailto:` link
+when an email address is configured.
+
+Librarian recommendations require an external JSON file. No real profiles are
+bundled. The minimum shape is:
+
+```json
+{
+  "librarians": [
+    {
+      "id": "accounting",
+      "name": "Accounting Librarian",
+      "title": "Business Research Librarian",
+      "email": "accounting@example.edu",
+      "url": "https://library.smu.edu.sg/example-profile",
+      "subjects": ["accounting", "audit fees"],
+      "keywords": ["corporate governance"],
+      "aliases": ["financial reporting"],
+      "best_for": ["accounting datasets", "WRDS", "Compustat"],
+      "schools": ["School of Accountancy"],
+      "resource_types": ["databases"],
+      "notes": "Consult for accounting and audit research."
+    }
+  ]
+}
+```
 
 ## Usage Examples
 
@@ -137,6 +193,7 @@ From a Claude Code conversation:
 - "Do we have access to JSTOR?"
 - "search for databases with data on cost of living"
 - "Get the full details for record alma991234567890"
+- "Recommend a librarian for this accounting search"
 - "Generate APA7 citations for these records"
 - "Export these records as BibTeX"
 
