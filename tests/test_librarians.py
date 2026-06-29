@@ -237,6 +237,83 @@ def test_format_recommendations_links_name_with_email_fallback():
     assert "Notes:" not in output
 
 
+def test_query_subphrase_matches_longer_profile_term():
+    directory = LibrarianDirectory.model_validate(
+        {
+            "librarians": [
+                {
+                    "id": "ai",
+                    "name": "AI Librarian",
+                    "subjects": ["AI deep research", "Deep research tools"],
+                }
+            ]
+        }
+    )
+
+    matches = recommend_librarians(directory, "deep research", [])
+
+    assert len(matches) == 1
+    assert matches[0].librarian.id == "ai"
+    assert "query" in matches[0].evidence_fields
+
+
+def test_single_generic_word_does_not_match_longer_profile_term():
+    directory = LibrarianDirectory.model_validate(
+        {
+            "librarians": [
+                {
+                    "id": "ai",
+                    "name": "AI Librarian",
+                    "subjects": ["AI deep research"],
+                }
+            ]
+        }
+    )
+
+    assert recommend_librarians(directory, "deep", []) == []
+    assert recommend_librarians(directory, "research", []) == []
+
+
+def test_record_metadata_subphrase_matches_longer_profile_term():
+    directory = LibrarianDirectory.model_validate(
+        {
+            "librarians": [
+                {
+                    "id": "ai",
+                    "name": "AI Librarian",
+                    "subjects": ["AI deep research"],
+                }
+            ]
+        }
+    )
+    record = PrimoRecord(title="A study", subjects=["Deep research"])
+
+    matches = recommend_librarians(directory, "irrelevant query", [record])
+
+    assert len(matches) == 1
+    assert matches[0].librarian.id == "ai"
+    assert "subjects" in matches[0].evidence_fields
+
+
+def test_stemmed_query_subphrase_still_matches_longer_profile_term():
+    directory = LibrarianDirectory.model_validate(
+        {
+            "librarians": [
+                {
+                    "id": "ai",
+                    "name": "AI Librarian",
+                    "subjects": ["AI deep research"],
+                }
+            ]
+        }
+    )
+
+    matches = recommend_librarians(directory, "deep researches", [])
+
+    assert len(matches) == 1
+    assert matches[0].librarian.id == "ai"
+
+
 def test_stem_collapses_regular_inflections():
     assert _stem("reviews") == _stem("review")
     assert _stem("bibliometrics") == "bibliometric"

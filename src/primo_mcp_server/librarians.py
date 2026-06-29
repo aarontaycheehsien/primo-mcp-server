@@ -161,7 +161,14 @@ def _contains_term(text: str, term: str) -> bool:
     if not text_norm:
         return False
     if " " in term_norm:
-        return f" {term_norm} " in f" {text_norm} "
+        if f" {term_norm} " in f" {text_norm} ":
+            return True
+        # Reverse containment: the candidate text is itself a multi-word
+        # phrase fully contained in a longer profile term, e.g. query "deep
+        # research" against profile term "AI deep research". Gated on text
+        # also being multi-word so a single common word (e.g. "deep" alone)
+        # can't match a long, specific term.
+        return " " in text_norm and f" {text_norm} " in f" {term_norm} "
     return term_norm in set(text_norm.split())
 
 
