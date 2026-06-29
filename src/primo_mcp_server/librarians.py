@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 from typing import Iterable
@@ -114,8 +115,42 @@ def load_librarian_directory(
     return directory, None
 
 
+def _stem(token: str) -> str:
+    """Reduce a token to a conservative morphological stem.
+
+    This is intentionally lightweight (no NLP dependency): it collapses the
+    regular inflections that otherwise force curators to enumerate every word
+    form in a profile -- plurals ("reviews" -> "review", "bibliometrics" ->
+    "bibliometric"), and the common verb endings -ing/-ed. It is applied
+    symmetrically to both profile terms and record/query text, so even an
+    over-aggressive stem still matches as long as both sides reduce alike.
+    Short tokens (<= 3 chars) are left untouched to avoid mangling acronyms
+    such as "INK", "RDR", or "ESG".
+    """
+    t = token
+    if len(t) <= 3:
+        return t
+    if t.endswith("ies") and len(t) > 4:
+        return t[:-3] + "y"
+    if t.endswith(("sses", "shes", "ches", "xes", "zes")):
+        return t[:-2]
+    if t.endswith("es") and len(t) > 3:
+        t = t[:-1]
+    elif (
+        t.endswith("s")
+        and not t.endswith(("ss", "us", "is"))
+        and len(t) > 3
+    ):
+        t = t[:-1]
+    if t.endswith("ing") and len(t) > 5:
+        t = t[:-3]
+    elif t.endswith("ed") and len(t) > 4:
+        t = t[:-2]
+    return t
+
+
 def _normalise_text(value: str) -> str:
-    return " ".join(_TOKEN_RE.findall(value.casefold()))
+    return " ".join(_stem(token) for token in _TOKEN_RE.findall(value.casefold()))
 
 
 def _contains_term(text: str, term: str) -> bool:
@@ -206,6 +241,39 @@ def _record_field_texts(records: list[PrimoRecord]) -> dict[str, list[str]]:
     return {name: _unique(values) for name, values in fields.items()}
 
 
+def _librarian_terms(librarian: LibrarianProfile) -> Iterable[str]:
+    """Yield every term a librarian lists across all profile fields."""
+    yield from librarian.subjects
+    yield from librarian.aliases
+    yield from librarian.keywords
+    yield from librarian.best_for
+    yield from librarian.schools
+    yield from librarian.resource_types
+
+
+def _term_specificity(directory: LibrarianDirectory) -> dict[str, float]:
+    """Inverse-document-frequency weight per normalised term.
+
+    Terms that nearly every librarian lists (e.g. broad "research") carry
+    little routing signal, so they get a multiplier near 1.0. Terms unique to
+    one librarian are discriminative and are amplified -- this is what lets a
+    short, specialised profile (e.g. "Digital Preservation") outrank a long,
+    keyword-padded one when a distinctive term actually matches.
+    """
+    n = len(directory.librarians)
+    if n == 0:
+        return {}
+    doc_freq: dict[str, int] = {}
+    for librarian in directory.librarians:
+        seen: set[str] = set()
+        for term in _librarian_terms(librarian):
+            norm = _normalise_text(term)
+            if norm and norm not in seen:
+                seen.add(norm)
+                doc_freq[norm] = doc_freq.get(norm, 0) + 1
+    return {term: 1.0 + math.log(n / df) for term, df in doc_freq.items()}
+
+
 def _score_term(
     term: str,
     texts_by_field: dict[str, list[str]],
@@ -234,6 +302,7 @@ def recommend_librarians(
     """Rank configured librarians against a query and Primo record metadata."""
     records = records or []
     texts_by_field = {"query": [query], **_record_field_texts(records)}
+    specificity = _term_specificity(directory)
 
     matches: list[LibrarianMatch] = []
     for librarian in directory.librarians:
@@ -310,6 +379,7 @@ def recommend_librarians(
                 term_score, term_fields = _score_term(term, texts_by_field, weights)
                 if term_score <= 0:
                     continue
+                term_score *= specificity.get(_normalise_text(term), 1.0)
                 score += term_score
                 matched_terms.append(term)
                 evidence_fields.extend(term_fields)
@@ -334,8 +404,14 @@ def format_librarian_recommendations(
     query: str,
     *,
     configuration_message: str | None = None,
+    semantic: bool = False,
 ) -> str:
-    """Format librarian recommendations for MCP responses."""
+    """Format librarian recommendations for MCP responses.
+
+    When ``semantic`` is true the matches came from the embedding fallback
+    rather than exact keyword scoring; this is surfaced in the status and
+    evidence lines so callers can convey the lower confidence.
+    """
     if configuration_message:
         return (
             f"{_SECTION_HEADING}\n\n"
@@ -351,14 +427,21 @@ def format_librarian_recommendations(
             f'Message: No librarian recommendation met the confidence threshold for "{query}".'
         )
 
-    lines = [_SECTION_HEADING, "", "Status: matched"]
+    status = "matched (semantic fallback)" if semantic else "matched"
+    lines = [_SECTION_HEADING, "", f"Status: {status}"]
     for i, match in enumerate(matches, start=1):
         librarian = match.librarian
+        if semantic:
+            evidence = (
+                f"semantic similarity {match.score:.2f}; no exact keyword match"
+            )
+        else:
+            evidence = _format_match_evidence(match)
         lines.append(f"{i}. Name: {_format_linked_name(librarian)}")
         lines.append(f"   Title: {librarian.title or _UNCONFIGURED}")
         lines.append(f"   Contact: {librarian.email or _UNCONFIGURED}")
         lines.append(f"   Best for: {_format_best_for_sentence(librarian.best_for)}")
-        lines.append(f"   Evidence: {_format_match_evidence(match)}")
+        lines.append(f"   Evidence: {evidence}")
 
     lines.append(_RECOMMENDATION_FOOTER)
     return "\n".join(lines)

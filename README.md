@@ -133,8 +133,28 @@ environment variables:
 | `PRIMO_LIBRARIANS_FILE` | unset | External JSON librarian directory used for recommendations |
 | `PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS` | `true` | Append a bottom `Recommended librarian help:` section to `primo_search` output |
 | `PRIMO_LIBRARIAN_MIN_SCORE` | `5.0` | Minimum deterministic match score required before showing a recommendation |
+| `PRIMO_LIBRARIAN_SEMANTIC_FALLBACK` | `false` | Enable the embedding fallback used only when keyword matching finds no librarian |
+| `PRIMO_EMBEDDING_API_KEY` | unset | Google Gemini API key for the semantic fallback |
+| `PRIMO_EMBEDDING_MODEL` | `gemini-embedding-001` | Embedding model for the semantic fallback |
+| `PRIMO_EMBEDDING_API_URL` | `https://generativelanguage.googleapis.com/v1beta` | Embedding API base URL |
+| `PRIMO_LIBRARIAN_SEMANTIC_MIN_SIMILARITY` | `0.65` | Minimum cosine similarity for a semantic recommendation |
+| `PRIMO_EMBEDDING_CACHE_FILE` | next to `PRIMO_LIBRARIANS_FILE` | Where profile embeddings are cached |
+| `PRIMO_EMBEDDING_TIMEOUT` | `10.0` | HTTP timeout for embedding requests in seconds |
 
 See `.env.example` for a commented template.
+
+### Semantic fallback (optional)
+
+Keyword matching is exact (after light stemming), so a query whose wording
+doesn't overlap any profile term returns no recommendation. Enabling
+`PRIMO_LIBRARIAN_SEMANTIC_FALLBACK=true` adds an embedding-based fallback that
+runs **only when keyword matching finds nothing**, so embeddings are computed
+only on misses. It uses Google's `gemini-embedding-001` (free tier — get a key
+at <https://aistudio.google.com/apikey>). Profile embeddings are cached to a
+sidecar file and recomputed only when a profile or the model changes. The layer
+fails closed: any embedding error degrades silently to the normal `no_match`
+result, and only configured profiles are ever returned. Semantic matches are
+labelled `Status: matched (semantic fallback)` to signal lower confidence.
 
 When `PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS=true` and a configured profile
 meets the score threshold, `primo_search` appends a bottom Markdown section

@@ -6,6 +6,8 @@ import json
 
 from primo_mcp_server.librarians import (
     LibrarianDirectory,
+    _stem,
+    _term_specificity,
     format_librarian_recommendations,
     load_librarian_directory,
     recommend_librarians,
@@ -233,6 +235,85 @@ def test_format_recommendations_links_name_with_email_fallback():
     assert "Title: Not configured" in output
     assert "Best for: No configured areas of support." in output
     assert "Notes:" not in output
+
+
+def test_stem_collapses_regular_inflections():
+    assert _stem("reviews") == _stem("review")
+    assert _stem("bibliometrics") == "bibliometric"
+    assert _stem("datasets") == "dataset"
+    assert _stem("studies") == "study"
+    # Short tokens / acronyms are left intact.
+    assert _stem("esg") == "esg"
+    assert _stem("ink") == "ink"
+
+
+def test_plural_query_matches_singular_subject_via_stemming():
+    directory = LibrarianDirectory.model_validate(
+        {
+            "librarians": [
+                {
+                    "id": "synthesis",
+                    "name": "Synthesis Librarian",
+                    "subjects": ["Systematic review"],
+                }
+            ]
+        }
+    )
+
+    plural = recommend_librarians(directory, "systematic reviews", [])
+    singular = recommend_librarians(directory, "systematic review", [])
+
+    assert len(plural) == 1
+    assert plural[0].librarian.id == "synthesis"
+    # Plural and singular phrasing now score identically.
+    assert plural[0].score == singular[0].score
+
+
+def test_specificity_amplifies_rare_terms_over_shared_ones():
+    directory = LibrarianDirectory.model_validate(
+        {
+            "librarians": [
+                {"id": "a", "name": "A", "subjects": ["research", "altmetrics"]},
+                {"id": "b", "name": "B", "subjects": ["research"]},
+                {"id": "c", "name": "C", "subjects": ["research"]},
+            ]
+        }
+    )
+
+    specificity = _term_specificity(directory)
+
+    # "research" is shared by every librarian -> near-neutral weight; the
+    # term unique to one librarian is amplified above it.
+    assert specificity["altmetric"] > specificity["research"]
+
+
+def test_distinctive_sparse_profile_outranks_generic_padded_profile():
+    directory = LibrarianDirectory.model_validate(
+        {
+            "librarians": [
+                {
+                    "id": "preservation",
+                    "name": "Preservation Librarian",
+                    "subjects": ["digital preservation"],
+                },
+                {
+                    "id": "generalist",
+                    "name": "Generalist Librarian",
+                    "subjects": [
+                        "data",
+                        "data management",
+                        "data services",
+                        "research data",
+                    ],
+                },
+                {"id": "filler", "name": "Filler", "subjects": ["data"]},
+            ]
+        }
+    )
+
+    matches = recommend_librarians(directory, "digital preservation data", [])
+
+    assert matches[0].librarian.id == "preservation"
 
 
 def test_format_recommendations_no_match_uses_heading():

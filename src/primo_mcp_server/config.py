@@ -46,3 +46,19 @@ class PrimoConfig(BaseSettings):
     librarians_file: str | None = None
     inline_librarian_recommendations: bool = True
     librarian_min_score: float = 5.0
+
+    # Optional semantic (embedding) fallback for librarian recommendations.
+    # Only consulted when the deterministic keyword matcher finds no match.
+    # Opt in by setting librarian_semantic_fallback=true and providing a
+    # Gemini API key. Defaults target Google's gemini-embedding-001 free tier.
+    librarian_semantic_fallback: bool = False
+    embedding_api_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    embedding_model: str = "gemini-embedding-001"
+    embedding_api_key: str | None = None
+    # gemini-embedding-001 has a high cosine baseline (~0.5 for unrelated text),
+    # so the floor is deliberately high to keep the fallback high-precision.
+    librarian_semantic_min_similarity: float = 0.65
+    # Where profile embeddings are cached. Defaults to a sibling of
+    # librarians_file (e.g. librarian-profile-embeddings.json).
+    embedding_cache_file: str | None = None
+    embedding_timeout: float = 10.0

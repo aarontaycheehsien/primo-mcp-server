@@ -15,6 +15,7 @@ from primo_mcp_server.formatter import (
     format_search_results,
     format_suggestions,
 )
+from primo_mcp_server.librarian_embeddings import semantic_fallback
 from primo_mcp_server.librarians import (
     format_librarian_recommendations,
     load_librarian_directory,
@@ -72,14 +73,19 @@ def _get_config(ctx: Context) -> PrimoConfig:
     return ctx.request_context.lifespan_context["config"]
 
 
-def _format_recommendations_for_records(
+async def _format_recommendations_for_records(
     config: PrimoConfig,
     query: str,
     records,
     *,
     limit: int = 2,
 ) -> str:
-    """Load configured profiles and format validated recommendations."""
+    """Load configured profiles and format validated recommendations.
+
+    Deterministic keyword matching runs first. Only when it finds nothing and
+    the semantic fallback is enabled do we embed the query for a similarity
+    search -- so the embedding cost is paid only on keyword misses.
+    """
     directory, message = load_librarian_directory(config.librarians_file)
     if message or directory is None:
         return format_librarian_recommendations(
@@ -95,7 +101,13 @@ def _format_recommendations_for_records(
         limit=limit,
         min_score=config.librarian_min_score,
     )
-    return format_librarian_recommendations(matches, query)
+    semantic = False
+    if not matches and config.librarian_semantic_fallback:
+        matches = await semantic_fallback(
+            directory, query, records, config, limit=limit
+        )
+        semantic = bool(matches)
+    return format_librarian_recommendations(matches, query, semantic=semantic)
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +206,7 @@ async def primo_search(
             include_unavailable=include_unavailable,
         )
         if recommend_librarians and config.inline_librarian_recommendations:
-            result += "\n\n" + _format_recommendations_for_records(
+            result += "\n\n" + await _format_recommendations_for_records(
                 config,
                 query,
                 response.records,
@@ -341,7 +353,7 @@ async def primo_recommend_librarians(
             )
             records = response.records
 
-        return _format_recommendations_for_records(
+        return await _format_recommendations_for_records(
             config,
             query,
             records,
