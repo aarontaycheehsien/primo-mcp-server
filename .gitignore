@@ -10,3 +10,5 @@ build/
 *.egg
 # Generated embedding cache for the librarian semantic fallback
 *-embeddings.json
+# Real institutional librarian directory (contains staff names/emails)
+librarian-profile.json

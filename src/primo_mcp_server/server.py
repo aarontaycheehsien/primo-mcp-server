@@ -17,8 +17,10 @@ from primo_mcp_server.formatter import (
 )
 from primo_mcp_server.librarian_embeddings import semantic_fallback
 from primo_mcp_server.librarians import (
+    _MAX_RECOMMENDATIONS,
     format_librarian_recommendations,
-    load_librarian_directory,
+    load_librarian_directory_cached,
+    looks_like_identifier,
     recommend_librarians as rank_librarians,
 )
 
@@ -79,14 +81,34 @@ async def _format_recommendations_for_records(
     records,
     *,
     limit: int = 2,
+    embedding_timeout: float | None = None,
 ) -> str:
     """Load configured profiles and format validated recommendations.
 
-    Deterministic keyword matching runs first. Only when it finds nothing and
-    the semantic fallback is enabled do we embed the query for a similarity
-    search -- so the embedding cost is paid only on keyword misses.
+    Deterministic keyword matching runs first. The semantic path runs when
+    keywords find nothing OR when the best keyword score falls below the
+    second-guess threshold, so a marginal keyword win (one generic stemmed
+    term) cannot suppress a strong semantic match. Keyword matches stay
+    primary and are never displaced; passing semantic candidates for other
+    librarians are appended within the limit. Embedding cost is still paid
+    only when keywords are weak or absent.
+
+    Identifier-shaped queries (DOI, ISBN, ISSN, record ids) skip both paths:
+    embedding a DOI produces noise and keyword-matching one is meaningless.
     """
-    directory, message = load_librarian_directory(config.librarians_file)
+    if looks_like_identifier(query):
+        return format_librarian_recommendations(
+            [],
+            query,
+            skip_reason=(
+                "The query looks like a record identifier (DOI, ISBN, ISSN, "
+                "or record ID), so librarian recommendations were skipped."
+            ),
+        )
+
+    directory, message, specificity = load_librarian_directory_cached(
+        config.librarians_file
+    )
     if message or directory is None:
         return format_librarian_recommendations(
             [],
@@ -100,14 +122,40 @@ async def _format_recommendations_for_records(
         records,
         limit=limit,
         min_score=config.librarian_min_score,
+        specificity=specificity,
     )
-    semantic = False
-    if not matches and config.librarian_semantic_fallback:
-        matches = await semantic_fallback(
-            directory, query, records, config, limit=limit
+    semantic_error: str | None = None
+    semantic_skipped: str | None = None
+    best_keyword_score = matches[0].score if matches else 0.0
+    if config.librarian_semantic_fallback and (
+        not matches
+        or best_keyword_score < config.librarian_semantic_second_guess_score
+    ):
+        semantic = await semantic_fallback(
+            directory,
+            query,
+            records,
+            config,
+            limit=limit,
+            timeout=embedding_timeout,
         )
-        semantic = bool(matches)
-    return format_librarian_recommendations(matches, query, semantic=semantic)
+        semantic_error = semantic.error
+        semantic_skipped = semantic.skipped
+        keyword_ids = {match.librarian.id for match in matches}
+        matches = (
+            matches
+            + [
+                match
+                for match in semantic.matches
+                if match.librarian.id not in keyword_ids
+            ]
+        )[: min(max(1, limit), _MAX_RECOMMENDATIONS)]
+    return format_librarian_recommendations(
+        matches,
+        query,
+        semantic_error=semantic_error,
+        semantic_skipped=semantic_skipped,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -205,12 +253,22 @@ async def primo_search(
             peer_reviewed=peer_reviewed,
             include_unavailable=include_unavailable,
         )
-        if recommend_librarians and config.inline_librarian_recommendations:
+        if (
+            recommend_librarians
+            and config.inline_librarian_recommendations
+            # Identifier lookups (DOI, ISBN, record ids) get no inline
+            # recommendation section at all rather than a "skipped" notice.
+            and not looks_like_identifier(query)
+        ):
             result += "\n\n" + await _format_recommendations_for_records(
                 config,
                 query,
                 response.records,
                 limit=librarian_limit,
+                # Inline recommendations ride on every ordinary search, so a
+                # slow embedding call gets a tighter budget than the explicit
+                # primo_recommend_librarians tool.
+                embedding_timeout=config.embedding_inline_timeout,
             )
         return result
     except PrimoAPIError as e:

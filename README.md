@@ -133,13 +133,20 @@ environment variables:
 | `PRIMO_LIBRARIANS_FILE` | unset | External JSON librarian directory used for recommendations |
 | `PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS` | `true` | Append a bottom `Recommended librarian help:` section to `primo_search` output |
 | `PRIMO_LIBRARIAN_MIN_SCORE` | `5.0` | Minimum deterministic match score required before showing a recommendation |
-| `PRIMO_LIBRARIAN_SEMANTIC_FALLBACK` | `false` | Enable the embedding fallback used only when keyword matching finds no librarian |
+| `PRIMO_LIBRARIAN_SEMANTIC_FALLBACK` | `false` | Enable the embedding path used when keyword matching finds nothing or matches weakly |
 | `PRIMO_EMBEDDING_API_KEY` | unset | Google Gemini API key for the semantic fallback |
 | `PRIMO_EMBEDDING_MODEL` | `gemini-embedding-001` | Embedding model for the semantic fallback |
 | `PRIMO_EMBEDDING_API_URL` | `https://generativelanguage.googleapis.com/v1beta` | Embedding API base URL |
-| `PRIMO_LIBRARIAN_SEMANTIC_MIN_SIMILARITY` | `0.65` | Minimum cosine similarity for a semantic recommendation |
+| `PRIMO_LIBRARIAN_SEMANTIC_MIN_SIMILARITY` | `0.60` | Absolute cosine floor for a semantic recommendation |
+| `PRIMO_LIBRARIAN_SEMANTIC_MARGIN` | `0.08` | Self-calibrating margin: a match must exceed the mean similarity across all profiles by this much |
+| `PRIMO_LIBRARIAN_SEMANTIC_MARGIN_MIN_PROFILES` | `4` | Directory size at which the margin rule starts applying |
+| `PRIMO_LIBRARIAN_SEMANTIC_MIN_TOP_GAP` | `0.05` | Below the margin's profile minimum, the top match must lead the runner-up by this cosine gap (top-1 only) |
+| `PRIMO_LIBRARIAN_SEMANTIC_MIN_QUERY_TOKENS` | `2` | Skip the semantic fallback (no embedding call) for queries with fewer topical words; `1` disables the gate |
+| `PRIMO_LIBRARIAN_SEMANTIC_SECOND_GUESS_SCORE` | `12.0` | Keyword scores below this are second-guessed by the semantic path (`0` = strict miss-only cascade) |
+| `PRIMO_EMBEDDING_DIMENSIONS` | unset | Optional Matryoshka truncation (e.g. `768`) to cut cache size and latency |
 | `PRIMO_EMBEDDING_CACHE_FILE` | next to `PRIMO_LIBRARIANS_FILE` | Where profile embeddings are cached |
 | `PRIMO_EMBEDDING_TIMEOUT` | `10.0` | HTTP timeout for embedding requests in seconds |
+| `PRIMO_EMBEDDING_INLINE_TIMEOUT` | `2.5` | Tighter embedding budget for inline `primo_search` recommendations |
 
 See `.env.example` for a commented template.
 
@@ -147,14 +154,46 @@ See `.env.example` for a commented template.
 
 Keyword matching is exact (after light stemming), so a query whose wording
 doesn't overlap any profile term returns no recommendation. Enabling
-`PRIMO_LIBRARIAN_SEMANTIC_FALLBACK=true` adds an embedding-based fallback that
-runs **only when keyword matching finds nothing**, so embeddings are computed
-only on misses. It uses Google's `gemini-embedding-001` (free tier — get a key
-at <https://aistudio.google.com/apikey>). Profile embeddings are cached to a
-sidecar file and recomputed only when a profile or the model changes. The layer
-fails closed: any embedding error degrades silently to the normal `no_match`
-result, and only configured profiles are ever returned. Semantic matches are
-labelled `Status: matched (semantic fallback)` to signal lower confidence.
+`PRIMO_LIBRARIAN_SEMANTIC_FALLBACK=true` adds an embedding-based path that runs
+when keyword matching **finds nothing or matches only weakly** (best score
+below `PRIMO_LIBRARIAN_SEMANTIC_SECOND_GUESS_SCORE`), so embeddings are
+computed only when keywords are unconvincing. Keyword matches stay primary and
+are never displaced; a passing semantic candidate for a different librarian is
+appended within the limit. It uses Google's `gemini-embedding-001` (free tier —
+get a key at <https://aistudio.google.com/apikey>); all profile texts are
+embedded in a single `batchEmbedContents` request, cached to a sidecar file,
+and recomputed only when a profile, the model, or the output dimensionality
+changes.
+
+Acceptance is self-calibrating rather than a single tuned constant, with
+three regimes by directory size: with at least
+`PRIMO_LIBRARIAN_SEMANTIC_MARGIN_MIN_PROFILES` profiles the top matches must
+exceed the mean similarity across all profiles by
+`PRIMO_LIBRARIAN_SEMANTIC_MARGIN`; smaller directories accept only the top
+profile and only when it leads the runner-up by
+`PRIMO_LIBRARIAN_SEMANTIC_MIN_TOP_GAP`; a single-profile directory falls back
+to the absolute cosine floor alone. Queries with fewer than
+`PRIMO_LIBRARIAN_SEMANTIC_MIN_QUERY_TOKENS` topical words (stopwords and
+filler words don't count) skip the semantic path entirely -- short or vague
+queries are where cosine similarity is least reliable, and the skip happens
+before any embedding call is made. Skips are reported in the output the same
+way errors are, so they are never mistaken for a genuine no-match. To set the
+floor, margin, and gap empirically for your own directory, print the
+similarity distribution for representative test queries:
+
+```bash
+python -m primo_mcp_server.calibrate_embeddings "systematic review screening" "GIS data for urban planning"
+```
+
+The layer fails closed — only configured profiles are ever returned, and any
+embedding error degrades to the keyword outcome — but not silently: errors are
+logged to stderr and surfaced in the output as a
+`semantic fallback errored` note so an invalid API key is distinguishable from
+a genuine no-match. Semantic matches are labelled
+`Status: matched (semantic fallback)` and report their cosine similarity so
+callers can reason about confidence. Identifier-shaped queries (DOIs, ISBNs,
+ISSNs, Alma/CDI record ids) skip librarian recommendations entirely on both
+paths.
 
 When `PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS=true` and a configured profile
 meets the score threshold, `primo_search` appends a bottom Markdown section

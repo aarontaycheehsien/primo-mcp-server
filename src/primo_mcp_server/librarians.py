@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, NamedTuple
 
 from pydantic import BaseModel, Field, ValidationError
 
 from primo_mcp_server.models import PrimoRecord
+
+logger = logging.getLogger(__name__)
 
 
 _MAX_RECOMMENDATIONS = 3
@@ -48,6 +51,10 @@ class LibrarianProfile(BaseModel):
     best_for: list[str] = Field(default_factory=list)
     schools: list[str] = Field(default_factory=list)
     resource_types: list[str] = Field(default_factory=list)
+    # Curator deny-list: if any of these terms appears in the user's query,
+    # this librarian is never recommended (keyword or semantic path). Lets an
+    # institution patch an observed misrouting without retuning weights.
+    excludes: list[str] = Field(default_factory=list)
     notes: str = ""
 
 
@@ -122,7 +129,136 @@ def load_librarian_directory(
         return None, _configuration_message(
             str(resolved), "The directory contains no librarians."
         )
+
+    duplicates = _duplicate_ids(directory)
+    if duplicates:
+        return None, _configuration_message(
+            str(resolved),
+            f"Duplicate librarian id(s): {', '.join(duplicates)}. "
+            "Each id must be unique.",
+        )
+
+    _warn_about_filler_terms(directory)
     return directory, None
+
+
+def _warn_about_filler_terms(directory: LibrarianDirectory) -> None:
+    """Log profiles listing filler terms so curators can clean the source.
+
+    Filler terms are silently ignored during scoring (see _FILLER_TERMS), so
+    listing them is harmless but pointless; the warning surfaces the wasted
+    entries once per directory (re)load without failing the load.
+    """
+    for librarian in directory.librarians:
+        fillers = _unique(
+            term
+            for term in _librarian_terms(librarian)
+            if _is_filler_term(term)
+        )
+        if fillers:
+            logger.warning(
+                "Librarian profile %r lists filler term(s) that never "
+                "match: %s",
+                librarian.id,
+                ", ".join(fillers),
+            )
+
+
+def _duplicate_ids(directory: LibrarianDirectory) -> list[str]:
+    """Ids that appear more than once (case-insensitively), in file order.
+
+    Unenforced duplicates would silently collide downstream: the embedding
+    cache and the keyword/semantic de-dup logic both key results by id, so a
+    repeated id makes one profile's data overwrite or hide another's with no
+    error anywhere.
+    """
+    seen: dict[str, int] = {}
+    for librarian in directory.librarians:
+        key = librarian.id.casefold()
+        seen[key] = seen.get(key, 0) + 1
+    return _unique(
+        librarian.id for librarian in directory.librarians if seen[librarian.id.casefold()] > 1
+    )
+
+
+class _DirectoryCacheEntry(NamedTuple):
+    mtime_ns: int
+    directory: LibrarianDirectory
+    specificity: dict[str, float]
+
+
+# Keyed by resolved absolute path. Every primo_search / primo_recommend_librarians
+# call needs the directory and its IDF specificity weights; re-reading and
+# re-parsing the JSON file and recomputing IDF on every request is wasted
+# work since the directory changes rarely. A file's mtime is cheap to check
+# (a single stat syscall) and lets repeat calls skip the reparse entirely.
+_directory_cache: dict[str, _DirectoryCacheEntry] = {}
+
+
+def load_librarian_directory_cached(
+    path: str | Path | None,
+) -> tuple[LibrarianDirectory | None, str | None, dict[str, float]]:
+    """Load a directory, reusing a cached parse when the file is unchanged.
+
+    Returns (directory, message, specificity). ``specificity`` is the IDF
+    weight map from ``_term_specificity``, computed once per cache refresh
+    rather than once per call. Failure results (missing/invalid file) are
+    never cached, so fixing the file takes effect on the very next call.
+    """
+    if path is None or str(path).strip() == "":
+        return None, _configuration_message(), {}
+
+    resolved = Path(path).expanduser()
+    try:
+        mtime_ns = resolved.stat().st_mtime_ns
+    except OSError:
+        # Let load_librarian_directory produce the precise error message
+        # (not-found vs permission vs other OS error).
+        directory, message = load_librarian_directory(path)
+        return directory, message, {}
+
+    cache_key = str(resolved)
+    cached = _directory_cache.get(cache_key)
+    if cached is not None and cached.mtime_ns == mtime_ns:
+        return cached.directory, None, cached.specificity
+
+    directory, message = load_librarian_directory(path)
+    if directory is None:
+        _directory_cache.pop(cache_key, None)
+        return None, message, {}
+
+    specificity = _term_specificity(directory)
+    _directory_cache[cache_key] = _DirectoryCacheEntry(mtime_ns, directory, specificity)
+    return directory, None, specificity
+
+
+_IDENTIFIER_PATTERNS = (
+    re.compile(r"\b10\.\d{4,9}/\S+"),  # DOI
+    re.compile(r"doi\.org/", re.IGNORECASE),
+    re.compile(r"\bdoi\s*:", re.IGNORECASE),
+    re.compile(r"\bisbn\s*:?\s*[\d\- ]{9,17}[\dxX]\b", re.IGNORECASE),
+    re.compile(r"\bissn\s*:?\s*\d{4}-?\d{3}[\dxX]\b", re.IGNORECASE),
+    re.compile(r"\b\d{4}-\d{3}[\dxX]\b"),  # bare ISSN
+    re.compile(r"\balma\d{6,}\b", re.IGNORECASE),  # Alma MMS record id
+    re.compile(r"\bcdi_\w+", re.IGNORECASE),  # CDI record id
+)
+
+
+def looks_like_identifier(query: str) -> bool:
+    """True when the query is a record identifier rather than a topic.
+
+    Embedding a DOI or ISBN produces noise, and keyword-matching one against
+    subject profiles is meaningless, so librarian recommendations skip
+    identifier-shaped queries entirely (both matching paths).
+    """
+    text = query.strip()
+    if not text:
+        return False
+    # A bare ISBN-10/13 (possibly hyphenated/spaced) as the whole query.
+    compact = re.sub(r"[\s\-]", "", text)
+    if re.fullmatch(r"\d{9,13}|\d{9,12}[xX]", compact):
+        return True
+    return any(pattern.search(text) for pattern in _IDENTIFIER_PATTERNS)
 
 
 def _stem(token: str) -> str:
@@ -163,6 +299,100 @@ def _normalise_text(value: str) -> str:
     return " ".join(_stem(token) for token in _TOKEN_RE.findall(value.casefold()))
 
 
+# Universal filler words carry no routing signal from ANY evidence field,
+# query included: "I need research support" says nothing about which subject
+# librarian to consult, yet real profiles do list words like "research" and
+# phrases like "Research support" as terms. Unlike _GENERIC_METADATA_TERMS
+# (which are merely too weak to trust from noisy record metadata but still
+# meaningful in a direct query, e.g. "policy"), a term composed entirely of
+# filler words never scores anywhere. Stored normalised so singular and
+# plural profile spellings match.
+_FILLER_TERMS = frozenset(
+    _normalise_text(term)
+    for term in (
+        "research",
+        "support",
+        "help",
+        "consultation",
+        "consultations",
+        "service",
+        "services",
+        "resource",
+        "resources",
+        "assistance",
+        "information",
+        "librarian",
+        "library",
+        "question",
+        "questions",
+        "guide",
+        "guides",
+        "general",
+    )
+)
+
+
+def _is_filler_term(term: str) -> bool:
+    """True when every token of the term is a filler word.
+
+    Catches both bare fillers ("research") and filler-only phrases real
+    profiles list ("Research support", "Research consultation"), while
+    keeping phrases where any token adds signal ("legal research",
+    "research data management").
+    """
+    tokens = _normalise_text(term).split()
+    return bool(tokens) and all(token in _FILLER_TERMS for token in tokens)
+
+
+# Function words and question scaffolding, used only to measure how much of
+# a query a matched term actually explains -- never for matching itself.
+# Normalised so stemming stays symmetric with query text.
+_STOPWORDS = frozenset(
+    _normalise_text(word)
+    for word in (
+        "a", "an", "the", "and", "or", "of", "in", "on", "at", "for",
+        "to", "with", "about", "from", "by", "into", "using",
+        "is", "are", "was", "be", "do", "does", "did",
+        "can", "could", "would", "should", "will",
+        "i", "me", "my", "we", "our", "you", "your", "it",
+        "this", "that", "these", "those",
+        "how", "what", "which", "who", "where", "when",
+        "need", "needs", "want", "wants", "looking", "look",
+        "find", "get", "please", "some", "any",
+    )
+)
+
+
+def _content_token_count(text: str) -> int:
+    """Count query tokens that carry topical signal (non-stopword, non-filler)."""
+    return sum(
+        1
+        for token in _normalise_text(text).split()
+        if token not in _STOPWORDS and token not in _FILLER_TERMS
+    )
+
+
+# Query-evidence dampening floor: even a term covering a sliver of a long
+# query keeps 40% of its weight, so a strong subject/alias hit still counts
+# but needs corroboration (metadata or specificity) to clear min_score.
+_MIN_QUERY_COVERAGE_FACTOR = 0.4
+
+
+def _query_coverage_factor(term: str, query_content_tokens: int) -> float:
+    """Scale query evidence by how much of the query the term explains.
+
+    A one-word term matched inside a twelve-word question is far weaker
+    evidence than the same term as the entire query, but both previously
+    earned identical query weight. sqrt softens the penalty so specific
+    multi-word terms in medium queries are barely affected.
+    """
+    if query_content_tokens <= 0:
+        return 1.0
+    term_tokens = len(_normalise_text(term).split())
+    coverage = min(1.0, term_tokens / query_content_tokens)
+    return max(_MIN_QUERY_COVERAGE_FACTOR, math.sqrt(coverage))
+
+
 def _contains_term(text: str, term: str, *, allow_reverse: bool = False) -> bool:
     term_norm = _normalise_text(term)
     if len(term_norm) < 2:
@@ -180,7 +410,20 @@ def _contains_term(text: str, term: str, *, allow_reverse: bool = False) -> bool
         # (e.g. "deep research" against "AI deep research"). Applying this to
         # record metadata creates false positives such as "Information services"
         # matching "legal information services".
-        return " " in text_norm and f" {text_norm} " in f" {term_norm} "
+        if not (" " in text_norm and f" {text_norm} " in f" {term_norm} "):
+            return False
+        # Guard against qualifier-stripping: the sub-phrase must carry
+        # signal of its own ("information services" inside "legal
+        # information services" drops exactly the word that made the term
+        # specific) and must cover at least half the term's tokens (so
+        # "data analysis" cannot claim a long specialised phrase).
+        text_tokens = text_norm.split()
+        if all(
+            token in _FILLER_TERMS or token in _STOPWORDS
+            for token in text_tokens
+        ):
+            return False
+        return 2 * len(text_tokens) >= len(term_norm.split())
     return term_norm in set(text_norm.split())
 
 
@@ -287,6 +530,13 @@ def _librarian_terms(librarian: LibrarianProfile) -> Iterable[str]:
     yield from librarian.resource_types
 
 
+# Ceiling on the IDF multiplier. Being unique within the directory is not the
+# same as being topically specific: without a cap, one idiosyncratic word on a
+# single profile is amplified without bound as the directory grows
+# (1 + ln(n/1) is ~4.4x at 30 profiles), letting an accidental term dominate.
+_MAX_SPECIFICITY = 3.0
+
+
 def _term_specificity(directory: LibrarianDirectory) -> dict[str, float]:
     """Inverse-document-frequency weight per normalised term.
 
@@ -307,14 +557,20 @@ def _term_specificity(directory: LibrarianDirectory) -> dict[str, float]:
             if norm and norm not in seen:
                 seen.add(norm)
                 doc_freq[norm] = doc_freq.get(norm, 0) + 1
-    return {term: 1.0 + math.log(n / df) for term, df in doc_freq.items()}
+    return {
+        term: min(_MAX_SPECIFICITY, 1.0 + math.log(n / df))
+        for term, df in doc_freq.items()
+    }
 
 
 def _score_term(
     term: str,
     texts_by_field: dict[str, list[str]],
     weights: dict[str, float],
+    query_content_tokens: int = 0,
 ) -> tuple[float, list[str]]:
+    if _is_filler_term(term):
+        return 0.0, []
     score = 0.0
     evidence_fields: list[str] = []
     is_generic = _normalise_text(term) in _GENERIC_METADATA_TERMS
@@ -328,6 +584,8 @@ def _score_term(
             _contains_term(text, term, allow_reverse=field == "query")
             for text in texts
         ):
+            if field == "query":
+                weight *= _query_coverage_factor(term, query_content_tokens)
             score += weight
             evidence_fields.append(field)
     return score, evidence_fields
@@ -387,6 +645,16 @@ def _is_strong_metadata_match(
     return any(_is_specific_multi_word_term(term) for term in unique_terms)
 
 
+def is_excluded(librarian: LibrarianProfile, query: str) -> bool:
+    """True when a curator deny-list term appears in the query.
+
+    Checked on both matching paths so an exclusion cannot be resurrected by
+    the semantic fallback. Only the query is inspected -- record metadata is
+    too incidental to justify suppressing a librarian.
+    """
+    return any(_contains_term(query, term) for term in librarian.excludes)
+
+
 def recommend_librarians(
     directory: LibrarianDirectory,
     query: str,
@@ -394,17 +662,32 @@ def recommend_librarians(
     *,
     limit: int = 2,
     min_score: float = 5.0,
+    specificity: dict[str, float] | None = None,
 ) -> list[LibrarianMatch]:
-    """Rank configured librarians against a query and Primo record metadata."""
+    """Rank configured librarians against a query and Primo record metadata.
+
+    ``specificity`` lets callers reuse a precomputed IDF weight map (see
+    ``load_librarian_directory_cached``) instead of paying the O(librarians x
+    terms) cost on every call; it is recomputed here when omitted.
+    """
     records = records or []
     texts_by_field = {"query": [query], **_record_field_texts(records)}
-    specificity = _term_specificity(directory)
+    query_content_tokens = _content_token_count(query)
+    if specificity is None:
+        specificity = _term_specificity(directory)
 
     matches: list[LibrarianMatch] = []
     for librarian in directory.librarians:
+        if is_excluded(librarian, query):
+            continue
         score = 0.0
         matched_terms: list[str] = []
         evidence_fields: list[str] = []
+        # Real profiles repeat terms -- within one list, across field groups,
+        # or as case/plural variants that normalise identically ("Altmetric"
+        # and "altmetrics"). Each concept may earn score only once; the first
+        # group in the fixed order below wins for cross-group repeats.
+        scored_norms: set[str] = set()
 
         term_groups: list[tuple[list[str], dict[str, float]]] = [
             (
@@ -472,10 +755,16 @@ def recommend_librarians(
 
         for terms, weights in term_groups:
             for term in terms:
-                term_score, term_fields = _score_term(term, texts_by_field, weights)
+                norm = _normalise_text(term)
+                if norm in scored_norms:
+                    continue
+                term_score, term_fields = _score_term(
+                    term, texts_by_field, weights, query_content_tokens
+                )
                 if term_score <= 0:
                     continue
-                term_score *= specificity.get(_normalise_text(term), 1.0)
+                scored_norms.add(norm)
+                term_score *= specificity.get(norm, 1.0)
                 score += term_score
                 matched_terms.append(term)
                 evidence_fields.extend(term_fields)
@@ -500,18 +789,29 @@ def recommend_librarians(
     return matches[:capped_limit]
 
 
+def is_semantic_match(match: LibrarianMatch) -> bool:
+    """True when a match came from the embedding fallback, not keywords."""
+    return match.evidence_fields == ["semantic"]
+
+
 def format_librarian_recommendations(
     matches: list[LibrarianMatch],
     query: str,
     *,
     configuration_message: str | None = None,
-    semantic: bool = False,
+    semantic_error: str | None = None,
+    semantic_skipped: str | None = None,
+    skip_reason: str | None = None,
 ) -> str:
     """Format librarian recommendations for MCP responses.
 
-    When ``semantic`` is true the matches came from the embedding fallback
-    rather than exact keyword scoring; this is surfaced in the status and
-    evidence lines so callers can convey the lower confidence.
+    Matches from the embedding fallback (detected per match, since keyword
+    and semantic results can now be mixed) surface their cosine similarity
+    so callers can reason about confidence. ``semantic_error`` distinguishes
+    "the semantic fallback errored" from a genuine no-match and
+    ``semantic_skipped`` explains a deliberate skip (e.g. query too short);
+    ``skip_reason`` reports why recommendation was skipped entirely (e.g.
+    identifier query).
     """
     if configuration_message:
         return (
@@ -520,21 +820,53 @@ def format_librarian_recommendations(
             f"Message: Librarian recommendations unavailable: {configuration_message}"
         )
 
-    if not matches:
+    if skip_reason:
         return (
             f"{_SECTION_HEADING}\n\n"
-            "Status: no_match\n"
+            "Status: skipped\n"
             f"Query: {query}\n"
-            f'Message: No librarian recommendation met the confidence threshold for "{query}".'
+            f"Message: {skip_reason}"
         )
 
-    status = "matched (semantic fallback)" if semantic else "matched"
+    if semantic_error:
+        error_note = (
+            "Note: the semantic fallback errored and was skipped "
+            f"({semantic_error}); only exact keyword matching ran."
+        )
+    elif semantic_skipped:
+        error_note = (
+            f"Note: the semantic fallback was skipped: {semantic_skipped}; "
+            "only exact keyword matching ran."
+        )
+    else:
+        error_note = None
+
+    if not matches:
+        lines = [
+            _SECTION_HEADING,
+            "",
+            "Status: no_match",
+            f"Query: {query}",
+            f'Message: No librarian recommendation met the confidence threshold for "{query}".',
+        ]
+        if error_note:
+            lines.append(error_note)
+        return "\n".join(lines)
+
+    status = (
+        "matched (semantic fallback)"
+        if all(is_semantic_match(match) for match in matches)
+        else "matched"
+    )
     lines = [_SECTION_HEADING, "", f"Status: {status}"]
+    if error_note:
+        lines.append(error_note)
     for i, match in enumerate(matches, start=1):
         librarian = match.librarian
+        semantic = is_semantic_match(match)
         if semantic:
             evidence = (
-                "Matched by semantic similarity. "
+                f"Matched by semantic similarity (cosine {match.score:.2f}). "
                 "No exact keyword match was found"
             )
         else:

@@ -232,3 +232,155 @@ async def test_primo_export_accepts_case_insensitive_format():
 
     assert "Unexpected error" not in output
     assert "@book{" in output
+
+
+def _write_metrics_librarians_file(tmp_path) -> str:
+    """Directory where a one-term keyword match scores below the
+    second-guess threshold (4.0 query weight x idf ~1.69 = ~6.8 < 12)."""
+    path = tmp_path / "metrics-librarians.json"
+    path.write_text(
+        json.dumps(
+            {
+                "librarians": [
+                    {
+                        "id": "metrics",
+                        "name": "Metrics Librarian",
+                        "keywords": ["bibliometrics"],
+                    },
+                    {
+                        "id": "gis",
+                        "name": "GIS Librarian",
+                        "email": "gis@example.edu",
+                        "subjects": ["geospatial analysis"],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _fake_semantic(librarian_id: str, calls: list):
+    from primo_mcp_server.librarian_embeddings import SemanticFallbackResult
+    from primo_mcp_server.librarians import LibrarianMatch
+
+    async def fake(directory, query, records, config, *, limit=2, timeout=None, **kwargs):
+        calls.append({"query": query, "timeout": timeout})
+        librarian = next(
+            lib for lib in directory.librarians if lib.id == librarian_id
+        )
+        return SemanticFallbackResult(
+            [
+                LibrarianMatch(
+                    librarian=librarian,
+                    score=0.82,
+                    evidence_fields=["semantic"],
+                )
+            ]
+        )
+
+    return fake
+
+
+async def test_primo_search_skips_recommendations_for_identifier_query(tmp_path):
+    output = await primo_search(
+        _fake_context(
+            config_overrides={"librarians_file": _write_librarians_file(tmp_path)}
+        ),
+        "10.1145/1571941.1572114",
+        scope="everything",
+    )
+
+    assert "Unexpected error" not in output
+    assert "## Recommended librarian help:" not in output
+
+
+async def test_primo_recommend_librarians_skips_identifier_query(tmp_path):
+    output = await primo_recommend_librarians(
+        _fake_context(
+            config_overrides={"librarians_file": _write_librarians_file(tmp_path)}
+        ),
+        "ISBN 978-0-13-468599-1",
+    )
+
+    assert "Status: skipped" in output
+    assert "record identifier" in output
+
+
+async def test_weak_keyword_match_is_second_guessed_semantically(
+    tmp_path, monkeypatch
+):
+    calls: list = []
+    monkeypatch.setattr(
+        "primo_mcp_server.server.semantic_fallback",
+        _fake_semantic("gis", calls),
+    )
+
+    output = await primo_recommend_librarians(
+        _fake_context(
+            config_overrides={
+                "librarians_file": _write_metrics_librarians_file(tmp_path),
+                "librarian_semantic_fallback": True,
+            }
+        ),
+        "bibliometrics",
+        record_ids=["alma123"],
+    )
+
+    # The weak keyword win stays primary; the semantic candidate is appended.
+    assert len(calls) == 1
+    assert "Status: matched\n" in output
+    assert output.index("Metrics Librarian") < output.index("GIS Librarian")
+    assert "matched terms: bibliometrics" in output
+    assert "Matched by semantic similarity (cosine 0.82)" in output
+    # Explicit tool keeps the full embedding timeout budget.
+    assert calls[0]["timeout"] is None
+
+
+async def test_strong_keyword_match_skips_semantic_second_guess(
+    tmp_path, monkeypatch
+):
+    calls: list = []
+    monkeypatch.setattr(
+        "primo_mcp_server.server.semantic_fallback",
+        _fake_semantic("data", calls),
+    )
+
+    output = await primo_recommend_librarians(
+        _fake_context(
+            config_overrides={
+                "librarians_file": _write_librarians_file(tmp_path),
+                "librarian_semantic_fallback": True,
+            }
+        ),
+        "executive compensation",
+    )
+
+    assert "Accounting Librarian" in output
+    assert calls == []  # no embedding cost when keywords are confident
+
+
+async def test_inline_search_uses_tighter_embedding_timeout(
+    tmp_path, monkeypatch
+):
+    calls: list = []
+    monkeypatch.setattr(
+        "primo_mcp_server.server.semantic_fallback",
+        _fake_semantic("gis", calls),
+    )
+
+    output = await primo_search(
+        _fake_context(
+            config_overrides={
+                "librarians_file": _write_metrics_librarians_file(tmp_path),
+                "librarian_semantic_fallback": True,
+            }
+        ),
+        "bibliometrics",
+        scope="everything",
+    )
+
+    assert "Unexpected error" not in output
+    assert len(calls) == 1
+    assert calls[0]["timeout"] == 2.5
