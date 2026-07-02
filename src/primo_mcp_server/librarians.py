@@ -22,6 +22,16 @@ _RECOMMENDATION_FOOTER = (
     "do not invent or substitute names."
 )
 _UNCONFIGURED = "Not configured"
+_NOISY_METADATA_FIELDS = {"description", "source"}
+_HIGH_SIGNAL_METADATA_FIELDS = {"subjects", "keywords"}
+_GENERIC_METADATA_TERMS = {
+    "analysis",
+    "data",
+    "policy",
+    "research",
+    "social science",
+    "support",
+}
 
 
 class LibrarianProfile(BaseModel):
@@ -153,7 +163,7 @@ def _normalise_text(value: str) -> str:
     return " ".join(_stem(token) for token in _TOKEN_RE.findall(value.casefold()))
 
 
-def _contains_term(text: str, term: str) -> bool:
+def _contains_term(text: str, term: str, *, allow_reverse: bool = False) -> bool:
     term_norm = _normalise_text(term)
     if len(term_norm) < 2:
         return False
@@ -163,11 +173,13 @@ def _contains_term(text: str, term: str) -> bool:
     if " " in term_norm:
         if f" {term_norm} " in f" {text_norm} ":
             return True
-        # Reverse containment: the candidate text is itself a multi-word
-        # phrase fully contained in a longer profile term, e.g. query "deep
-        # research" against profile term "AI deep research". Gated on text
-        # also being multi-word so a single common word (e.g. "deep" alone)
-        # can't match a long, specific term.
+        if not allow_reverse:
+            return False
+        # Reverse containment is allowed only for the user's query: the query
+        # may be a shorter phrase contained in a longer configured profile term
+        # (e.g. "deep research" against "AI deep research"). Applying this to
+        # record metadata creates false positives such as "Information services"
+        # matching "legal information services".
         return " " in text_norm and f" {text_norm} " in f" {term_norm} "
     return term_norm in set(text_norm.split())
 
@@ -202,6 +214,18 @@ def _format_best_for_sentence(values: list[str]) -> str:
     return f"Consult for {_format_human_list(values)}."
 
 
+def _format_similar_profile_topics(librarian: LibrarianProfile) -> str:
+    topics = _unique(
+        [
+            *librarian.best_for,
+            *librarian.subjects,
+            *librarian.aliases,
+            *librarian.keywords,
+        ]
+    )[:5]
+    return _format_list(topics)
+
+
 def _profile_link_target(librarian: LibrarianProfile) -> str:
     """Return a link target so displayed names are always Markdown links."""
     if librarian.url.strip():
@@ -222,6 +246,22 @@ def _format_match_evidence(match: LibrarianMatch) -> str:
     )
 
 
+def _record_texts(record: PrimoRecord) -> dict[str, list[str]]:
+    return {
+        "title": [record.title],
+        "subjects": record.subjects,
+        "keywords": record.keywords,
+        "description": [record.description, record.snippet],
+        "resource_type": [record.resource_type],
+        "source": [
+            record.source_label,
+            record.publisher,
+            record.journal_title,
+            record.is_part_of,
+        ],
+    }
+
+
 def _record_field_texts(records: list[PrimoRecord]) -> dict[str, list[str]]:
     fields: dict[str, list[str]] = {
         "title": [],
@@ -232,19 +272,8 @@ def _record_field_texts(records: list[PrimoRecord]) -> dict[str, list[str]]:
         "source": [],
     }
     for record in records:
-        fields["title"].append(record.title)
-        fields["subjects"].extend(record.subjects)
-        fields["keywords"].extend(record.keywords)
-        fields["description"].extend([record.description, record.snippet])
-        fields["resource_type"].append(record.resource_type)
-        fields["source"].extend(
-            [
-                record.source_label,
-                record.publisher,
-                record.journal_title,
-                record.is_part_of,
-            ]
-        )
+        for field, values in _record_texts(record).items():
+            fields[field].extend(values)
     return {name: _unique(values) for name, values in fields.items()}
 
 
@@ -288,14 +317,74 @@ def _score_term(
 ) -> tuple[float, list[str]]:
     score = 0.0
     evidence_fields: list[str] = []
+    is_generic = _normalise_text(term) in _GENERIC_METADATA_TERMS
     for field, texts in texts_by_field.items():
+        if is_generic and field in _NOISY_METADATA_FIELDS:
+            continue
         weight = weights.get(field, 0.0)
         if weight <= 0:
             continue
-        if any(_contains_term(text, term) for text in texts):
+        if any(
+            _contains_term(text, term, allow_reverse=field == "query")
+            for text in texts
+        ):
             score += weight
             evidence_fields.append(field)
     return score, evidence_fields
+
+
+def _is_generic_metadata_only_match(
+    matched_terms: list[str], evidence_fields: list[str]
+) -> bool:
+    if not matched_terms or "query" in evidence_fields:
+        return False
+    return all(
+        _normalise_text(term) in _GENERIC_METADATA_TERMS
+        for term in matched_terms
+    )
+
+
+def _is_specific_multi_word_term(term: str) -> bool:
+    return (
+        " " in _normalise_text(term)
+        and _normalise_text(term) not in _GENERIC_METADATA_TERMS
+    )
+
+
+def _metadata_supporting_record_count(
+    matched_terms: list[str], records: list[PrimoRecord]
+) -> int:
+    count = 0
+    for record in records:
+        fields = _record_texts(record)
+        if any(
+            any(
+                _contains_term(text, term)
+                for text in fields[field]
+            )
+            for term in matched_terms
+            for field in _HIGH_SIGNAL_METADATA_FIELDS
+        ):
+            count += 1
+    return count
+
+
+def _is_strong_metadata_match(
+    matched_terms: list[str],
+    evidence_fields: list[str],
+    records: list[PrimoRecord],
+) -> bool:
+    if "query" in evidence_fields:
+        return True
+    if not (_HIGH_SIGNAL_METADATA_FIELDS & set(evidence_fields)):
+        return False
+    if _metadata_supporting_record_count(matched_terms, records) < 2:
+        return False
+
+    unique_terms = _unique(matched_terms)
+    if len(unique_terms) >= 2:
+        return True
+    return any(_is_specific_multi_word_term(term) for term in unique_terms)
 
 
 def recommend_librarians(
@@ -391,6 +480,11 @@ def recommend_librarians(
                 matched_terms.append(term)
                 evidence_fields.extend(term_fields)
 
+        if _is_generic_metadata_only_match(
+            matched_terms, evidence_fields
+        ) or not _is_strong_metadata_match(matched_terms, evidence_fields, records):
+            continue
+
         if score >= min_score:
             matches.append(
                 LibrarianMatch(
@@ -440,14 +534,20 @@ def format_librarian_recommendations(
         librarian = match.librarian
         if semantic:
             evidence = (
-                f"semantic similarity {match.score:.2f}; no exact keyword match"
+                "Matched by semantic similarity. "
+                "No exact keyword match was found"
             )
         else:
             evidence = _format_match_evidence(match)
         lines.append(f"{i}. Name: {_format_linked_name(librarian)}")
         lines.append(f"   Title: {librarian.title or _UNCONFIGURED}")
         lines.append(f"   Contact: {librarian.email or _UNCONFIGURED}")
-        lines.append(f"   Best for: {_format_best_for_sentence(librarian.best_for)}")
+        if semantic:
+            lines.append(
+                f"   Similar profile topics: {_format_similar_profile_topics(librarian)}"
+            )
+        elif librarian.best_for:
+            lines.append(f"   Best for: {_format_best_for_sentence(librarian.best_for)}")
         lines.append(f"   Evidence: {evidence}")
 
     lines.append(_RECOMMENDATION_FOOTER)

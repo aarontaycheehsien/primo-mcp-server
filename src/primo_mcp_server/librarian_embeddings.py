@@ -64,13 +64,13 @@ def _profile_text(librarian: LibrarianProfile) -> str:
 
 
 def _query_text(query: str, records: list[PrimoRecord] | None) -> str:
-    """Combine the query with a little record context, length-bounded."""
-    parts = [query]
-    for record in (records or [])[:5]:
-        if record.title:
-            parts.append(record.title)
-        parts.extend(record.subjects[:5])
-    return " | ".join(p for p in parts if p)[:_MAX_QUERY_CHARS]
+    """Return the user query, length-bounded.
+
+    Returned-record context is deliberately ignored for semantic fallback. It
+    can contain incidental topics from search results that are not what the
+    user is asking for, producing broad false-positive librarian suggestions.
+    """
+    return query[:_MAX_QUERY_CHARS]
 
 
 def _hash(text: str, model: str) -> str:

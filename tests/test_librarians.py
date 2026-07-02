@@ -6,6 +6,7 @@ import json
 
 from primo_mcp_server.librarians import (
     LibrarianDirectory,
+    LibrarianMatch,
     _stem,
     _term_specificity,
     format_librarian_recommendations,
@@ -146,16 +147,31 @@ def test_best_for_match_from_query_is_recommended():
 
 
 def test_record_subject_metadata_can_drive_recommendation():
-    record = PrimoRecord(
-        title="Annual reports",
-        subjects=["Accounting"],
-    )
+    records = [
+        PrimoRecord(
+            title="Annual reports",
+            subjects=["Accounting", "Audit fees"],
+        ),
+        PrimoRecord(
+            title="Audit fee disclosures",
+            subjects=["Audit fees"],
+        ),
+    ]
 
-    matches = recommend_librarians(_directory(), "annual reports", [record])
+    matches = recommend_librarians(_directory(), "annual reports", records)
 
     assert len(matches) == 1
     assert matches[0].librarian.id == "accounting"
-    assert matches[0].evidence_fields == ["subjects"]
+    assert "subjects" in matches[0].evidence_fields
+
+
+def test_single_record_metadata_term_does_not_drive_recommendation():
+    record = PrimoRecord(
+        title="Annual reports",
+        subjects=["Accounting", "Audit fees"],
+    )
+
+    assert recommend_librarians(_directory(), "annual reports", [record]) == []
 
 
 def test_default_returns_top_two_and_orders_by_score():
@@ -186,6 +202,115 @@ def test_low_confidence_match_returns_no_recommendation():
     record = PrimoRecord(resource_type="database")
 
     assert recommend_librarians(directory, "general research", [record]) == []
+
+
+def test_generic_source_and_description_terms_do_not_drive_recommendation():
+    directory = LibrarianDirectory.model_validate(
+        {
+            "librarians": [
+                {
+                    "id": "research",
+                    "name": "Research Librarian",
+                    "subjects": ["research"],
+                },
+                {
+                    "id": "social",
+                    "name": "Social Science Librarian",
+                    "subjects": ["Social Science"],
+                },
+                {
+                    "id": "policy",
+                    "name": "Policy Librarian",
+                    "subjects": ["policy"],
+                },
+            ]
+        }
+    )
+    records = [
+        PrimoRecord(
+            title="Medicine",
+            description="A record from a social science collection.",
+            source_label="ProQuest research library",
+        )
+    ]
+
+    assert recommend_librarians(directory, "medicine", records) == []
+
+
+def test_generic_terms_still_match_when_user_query_is_direct():
+    directory = LibrarianDirectory.model_validate(
+        {
+            "librarians": [
+                {
+                    "id": "research",
+                    "name": "Research Librarian",
+                    "subjects": ["research"],
+                }
+            ]
+        }
+    )
+
+    matches = recommend_librarians(directory, "research support", [])
+
+    assert len(matches) == 1
+    assert matches[0].librarian.id == "research"
+    assert matches[0].evidence_fields == ["query"]
+
+
+def test_description_and_source_only_terms_do_not_drive_recommendation():
+    directory = LibrarianDirectory.model_validate(
+        {
+            "librarians": [
+                {
+                    "id": "altmetrics",
+                    "name": "Altmetrics Librarian",
+                    "subjects": ["altmetrics"],
+                }
+            ]
+        }
+    )
+    records = [
+        PrimoRecord(
+            title="Research impact",
+            description="This study analyses altmetrics for policy engagement.",
+            source_label="Altmetrics research library",
+        )
+    ]
+
+    matches = recommend_librarians(directory, "impact", records)
+
+    assert matches == []
+
+
+def test_high_signal_metadata_terms_can_drive_recommendation():
+    directory = LibrarianDirectory.model_validate(
+        {
+            "librarians": [
+                {
+                    "id": "altmetrics",
+                    "name": "Altmetrics Librarian",
+                    "subjects": ["altmetrics", "policy engagement"],
+                }
+            ]
+        }
+    )
+    records = [
+        PrimoRecord(
+            title="Research impact",
+            subjects=["Altmetrics"],
+            keywords=["Policy engagement"],
+        ),
+        PrimoRecord(
+            title="Publication metrics",
+            subjects=["Altmetrics"],
+        )
+    ]
+
+    matches = recommend_librarians(directory, "impact", records)
+
+    assert len(matches) == 1
+    assert matches[0].librarian.id == "altmetrics"
+    assert matches[0].evidence_fields == ["subjects", "keywords"]
 
 
 def test_format_recommendations_includes_validation_instruction():
@@ -233,8 +358,59 @@ def test_format_recommendations_links_name_with_email_fallback():
 
     assert "1. Name: [Data Librarian](mailto:data@example.edu)" in output
     assert "Title: Not configured" in output
-    assert "Best for: No configured areas of support." in output
+    assert "Best for:" not in output
     assert "Notes:" not in output
+
+
+def test_format_semantic_recommendations_uses_profile_topics_not_best_for():
+    librarian = _directory().librarians[0]
+    match = LibrarianMatch(
+        librarian=librarian,
+        score=0.6623,
+        evidence_fields=["semantic"],
+    )
+
+    output = format_librarian_recommendations(
+        [match],
+        "transparent evidence map workflow",
+        semantic=True,
+    )
+
+    assert "Status: matched (semantic fallback)" in output
+    assert "Best for:" not in output
+    assert (
+        "Similar profile topics: accounting datasets, audit research, "
+        "accounting, audit fees, financial reporting"
+    ) in output
+    assert (
+        "Evidence: Matched by semantic similarity. "
+        "No exact keyword match was found"
+    ) in output
+    assert "0.66" not in output
+    assert "semantic similarity 0.66" not in output
+
+
+def test_format_semantic_recommendations_uses_not_configured_without_topics():
+    match = LibrarianMatch(
+        librarian=LibrarianDirectory.model_validate(
+            {"librarians": [{"id": "general", "name": "General Librarian"}]}
+        ).librarians[0],
+        score=0.71,
+        evidence_fields=["semantic"],
+    )
+
+    output = format_librarian_recommendations(
+        [match],
+        "transparent evidence map workflow",
+        semantic=True,
+    )
+
+    assert "Best for:" not in output
+    assert "Similar profile topics: Not configured" in output
+    assert (
+        "Evidence: Matched by semantic similarity. "
+        "No exact keyword match was found"
+    ) in output
 
 
 def test_query_subphrase_matches_longer_profile_term():
@@ -274,7 +450,7 @@ def test_single_generic_word_does_not_match_longer_profile_term():
     assert recommend_librarians(directory, "research", []) == []
 
 
-def test_record_metadata_subphrase_matches_longer_profile_term():
+def test_record_metadata_subphrase_does_not_match_longer_profile_term():
     directory = LibrarianDirectory.model_validate(
         {
             "librarians": [
@@ -286,13 +462,12 @@ def test_record_metadata_subphrase_matches_longer_profile_term():
             ]
         }
     )
-    record = PrimoRecord(title="A study", subjects=["Deep research"])
+    records = [
+        PrimoRecord(title="A study", subjects=["Deep research"]),
+        PrimoRecord(title="Another study", subjects=["Deep research"]),
+    ]
 
-    matches = recommend_librarians(directory, "irrelevant query", [record])
-
-    assert len(matches) == 1
-    assert matches[0].librarian.id == "ai"
-    assert "subjects" in matches[0].evidence_fields
+    assert recommend_librarians(directory, "irrelevant query", records) == []
 
 
 def test_stemmed_query_subphrase_still_matches_longer_profile_term():

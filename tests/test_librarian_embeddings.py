@@ -10,6 +10,7 @@ import respx
 from primo_mcp_server.config import PrimoConfig
 from primo_mcp_server.librarian_embeddings import _gemini_embed, semantic_fallback
 from primo_mcp_server.librarians import LibrarianDirectory
+from primo_mcp_server.models import PrimoRecord
 
 # A tiny deterministic "embedding" space: one dimension per topic. A text's
 # vector marks which topics it mentions, so cosine similarity recovers topical
@@ -100,6 +101,18 @@ async def test_semantic_fallback_below_threshold_returns_empty(tmp_path):
         _directory(),
         "tropical marine biology",
         [],
+        _config(tmp_path),
+        embedder=_FakeEmbedder(),
+    )
+
+    assert matches == []
+
+
+async def test_semantic_fallback_ignores_record_context(tmp_path):
+    matches = await semantic_fallback(
+        _directory(),
+        "tropical marine biology",
+        [PrimoRecord(title="Digital preservation", subjects=["preservation"])],
         _config(tmp_path),
         embedder=_FakeEmbedder(),
     )
