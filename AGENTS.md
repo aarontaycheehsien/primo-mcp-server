@@ -27,6 +27,8 @@ This is the canonical agent guidance file for this fork.
 - `src/primo_mcp_server/librarian_embeddings.py` -- Optional Gemini embedding semantic fallback for recommendations (per-term vectors, max cosine per profile)
 - `src/primo_mcp_server/calibrate_embeddings.py` -- CLI for calibrating semantic fallback thresholds
 - `src/primo_mcp_server/profile_tools.py` -- Curator CLI: convert a CSV profile source to JSON and lint the directory
+- `src/primo_mcp_server/recommendation.py` -- Combined keyword + semantic recommendation pipeline (shared by the server and the evaluation harness)
+- `src/primo_mcp_server/evaluate_recommendations.py` -- CLI benchmark: golden labelled queries against the recommendation pipeline
 
 ## Running Tests
 
@@ -90,6 +92,13 @@ the user asks who the librarians are. Deterministic keyword matching runs first,
 with an optional Gemini embedding fallback when keyword matches are weak
 or absent. Identifier-shaped queries (DOI, ISBN, ISSN, record IDs) skip
 recommendations entirely. Recommendation counts are capped at 3.
+
+When tuning matching weights or thresholds, run the golden-query benchmark
+before and after and report the delta:
+
+```bash
+python -m primo_mcp_server.evaluate_recommendations librarian-eval.json --keyword-only
+```
 
 ## Conventions
 

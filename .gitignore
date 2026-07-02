@@ -14,3 +14,5 @@ build/
 # Real institutional librarian directory (contains staff names/emails)
 librarian-profile.json
 librarian-profile.csv
+# Local golden-query benchmark labelled with real profile ids
+librarian-eval.json

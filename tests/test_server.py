@@ -313,7 +313,7 @@ async def test_weak_keyword_match_is_second_guessed_semantically(
 ):
     calls: list = []
     monkeypatch.setattr(
-        "primo_mcp_server.server.semantic_fallback",
+        "primo_mcp_server.recommendation.semantic_fallback",
         _fake_semantic("gis", calls),
     )
 
@@ -343,7 +343,7 @@ async def test_strong_keyword_match_skips_semantic_second_guess(
 ):
     calls: list = []
     monkeypatch.setattr(
-        "primo_mcp_server.server.semantic_fallback",
+        "primo_mcp_server.recommendation.semantic_fallback",
         _fake_semantic("data", calls),
     )
 
@@ -366,7 +366,7 @@ async def test_inline_search_uses_tighter_embedding_timeout(
 ):
     calls: list = []
     monkeypatch.setattr(
-        "primo_mcp_server.server.semantic_fallback",
+        "primo_mcp_server.recommendation.semantic_fallback",
         _fake_semantic("gis", calls),
     )
 

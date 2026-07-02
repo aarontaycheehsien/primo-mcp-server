@@ -271,11 +271,19 @@ async def _load_or_build_profile_vectors(
 
     if pending:
         ordered = list(pending.items())
-        new_vectors = await embed([text for _, text in ordered], _TASK_DOCUMENT)
-        for (digest, _), vector in zip(ordered, new_vectors):
-            vectors_by_hash[digest] = vector
-        # Rewriting only the hashes in use prunes vectors for removed terms.
-        _write_cache(path, model_key, vectors_by_hash)
+        # Embed chunk by chunk and persist the cache after every chunk, so a
+        # mid-rebuild failure (free-tier rate limits are the common case for
+        # a large directory) keeps the progress made and a retry resumes
+        # from the remainder instead of restarting from zero. Rewriting only
+        # the hashes in use also prunes vectors for removed terms.
+        for start in range(0, len(ordered), _MAX_BATCH_SIZE):
+            chunk = ordered[start : start + _MAX_BATCH_SIZE]
+            new_vectors = await embed(
+                [text for _, text in chunk], _TASK_DOCUMENT
+            )
+            for (digest, _), vector in zip(chunk, new_vectors):
+                vectors_by_hash[digest] = vector
+            _write_cache(path, model_key, vectors_by_hash)
 
     return {
         lib_id: [

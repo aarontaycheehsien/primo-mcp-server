@@ -272,6 +272,27 @@ python -m primo_mcp_server.profile_tools lint
 `lint` exits 0 when clean, 1 with findings, and 2 when the directory cannot
 be read, so it can gate a profile-update workflow.
 
+### Measuring recommendation accuracy
+
+The `primo-eval` CLI benchmarks the recommendation pipeline against a golden
+set of labelled queries, so tuning changes to weights, thresholds, or the
+semantic path are judged by a measured delta instead of anecdote:
+
+```bash
+python -m primo_mcp_server.evaluate_recommendations librarian-eval.json --keyword-only
+```
+
+The eval file lists cases of the form
+`{"query": "...", "expect": ["librarian-id"]}`; an empty `expect` means the
+correct outcome is no recommendation (these cases measure false positives).
+Cases can pin `records` metadata for deterministic corroboration evidence.
+The report gives top-1 accuracy, hit rate within the returned list, and the
+correct-rejection rate. `--keyword-only` forces the deterministic path;
+without it the semantic fallback runs exactly when the server would run it.
+`--min-pass-rate 0.9` turns the run into a regression gate (exit 1 below the
+threshold). The eval runs the same pipeline module the server uses, so its
+numbers are statements about real server behaviour.
+
 ## Usage Examples
 
 From a Claude Code conversation:

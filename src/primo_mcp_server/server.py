@@ -15,15 +15,13 @@ from primo_mcp_server.formatter import (
     format_search_results,
     format_suggestions,
 )
-from primo_mcp_server.librarian_embeddings import semantic_fallback
 from primo_mcp_server.librarians import (
-    _MAX_RECOMMENDATIONS,
     format_librarian_directory,
     format_librarian_recommendations,
     load_librarian_directory_cached,
     looks_like_identifier,
-    recommend_librarians as rank_librarians,
 )
+from primo_mcp_server.recommendation import recommend_with_fallback
 
 
 @asynccontextmanager
@@ -87,13 +85,9 @@ async def _format_recommendations_for_records(
 ) -> str:
     """Load configured profiles and format validated recommendations.
 
-    Deterministic keyword matching runs first. The semantic path runs when
-    keywords find nothing OR when the best keyword score falls below the
-    second-guess threshold, so a marginal keyword win (one generic stemmed
-    term) cannot suppress a strong semantic match. Keyword matches stay
-    primary and are never displaced; passing semantic candidates for other
-    librarians are appended within the limit. Embedding cost is still paid
-    only when keywords are weak or absent.
+    The ranking itself lives in ``recommendation.recommend_with_fallback``
+    (shared with the offline evaluation harness); this helper adds the
+    identifier skip, directory loading, and MCP-facing formatting.
 
     Identifier-shaped queries (DOI, ISBN, ISSN, record ids) skip both paths:
     embedding a DOI produces noise and keyword-matching one is meaningless.
@@ -118,45 +112,20 @@ async def _format_recommendations_for_records(
             configuration_message=message,
         )
 
-    matches = rank_librarians(
+    outcome = await recommend_with_fallback(
         directory,
         query,
         records,
+        config,
         limit=limit,
-        min_score=config.librarian_min_score,
         specificity=specificity,
+        embedding_timeout=embedding_timeout,
     )
-    semantic_error: str | None = None
-    semantic_skipped: str | None = None
-    best_keyword_score = matches[0].score if matches else 0.0
-    if config.librarian_semantic_fallback and (
-        not matches
-        or best_keyword_score < config.librarian_semantic_second_guess_score
-    ):
-        semantic = await semantic_fallback(
-            directory,
-            query,
-            records,
-            config,
-            limit=limit,
-            timeout=embedding_timeout,
-        )
-        semantic_error = semantic.error
-        semantic_skipped = semantic.skipped
-        keyword_ids = {match.librarian.id for match in matches}
-        matches = (
-            matches
-            + [
-                match
-                for match in semantic.matches
-                if match.librarian.id not in keyword_ids
-            ]
-        )[: min(max(1, limit), _MAX_RECOMMENDATIONS)]
     return format_librarian_recommendations(
-        matches,
+        outcome.matches,
         query,
-        semantic_error=semantic_error,
-        semantic_skipped=semantic_skipped,
+        semantic_error=outcome.semantic_error,
+        semantic_skipped=outcome.semantic_skipped,
     )
 
 

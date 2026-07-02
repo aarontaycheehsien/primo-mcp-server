@@ -388,6 +388,64 @@ async def test_old_cache_format_is_discarded_and_rebuilt(tmp_path):
     assert [m.librarian.id for m in matches] == ["preservation"]
 
 
+async def test_failed_rebuild_keeps_progress_and_resumes(tmp_path):
+    # A directory with more terms than one batch: the first batch succeeds,
+    # the second fails (free-tier rate limits are the common case). The
+    # cache must keep the first batch so the retry embeds only the rest.
+    directory = LibrarianDirectory.model_validate(
+        {
+            "librarians": [
+                {
+                    "id": "big",
+                    "name": "Big Librarian",
+                    "subjects": [f"topic {i}" for i in range(120)],
+                },
+                {
+                    "id": "preservation",
+                    "name": "Preservation Librarian",
+                    "subjects": ["preservation"],
+                },
+            ]
+        }
+    )
+    config = _config(tmp_path)
+
+    class _FailsAfterFirstBatch(_FakeEmbedder):
+        async def __call__(self, texts, task_type):
+            if task_type == "RETRIEVAL_DOCUMENT" and self.calls:
+                self.calls.append((len(texts), task_type))
+                raise RuntimeError("rate limited")
+            return await super().__call__(texts, task_type)
+
+    first = _FailsAfterFirstBatch()
+    matches, error, _ = await semantic_fallback(
+        directory,
+        "digital preservation of archives",
+        [],
+        config,
+        embedder=first,
+    )
+    # Fails closed for this call, but the first batch of 100 is persisted.
+    assert error == "RuntimeError"
+    assert matches == []
+
+    second = _FakeEmbedder()
+    matches, error, _ = await semantic_fallback(
+        directory,
+        "digital preservation of archives",
+        [],
+        config,
+        embedder=second,
+    )
+    assert error is None
+    assert [m.librarian.id for m in matches] == ["preservation"]
+    document_batches = [
+        count for count, task in second.calls if task == "RETRIEVAL_DOCUMENT"
+    ]
+    # 121 terms total, 100 already cached: the retry embeds only 21.
+    assert document_batches == [21]
+
+
 async def test_profile_embeddings_are_cached_and_reused(tmp_path):
     config = _config(tmp_path)
     directory = _directory()
