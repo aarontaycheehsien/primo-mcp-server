@@ -195,7 +195,7 @@ async def primo_search(
 
     Args:
         query: Search terms (e.g. "machine learning entrepreneurship").
-        field: Search field -- "any" (default), "title", "creator", "sub" (subject), "isbn", "oclcnum".
+        field: Search field -- "any" (default), "title", "creator", "sub" (subject), "isbn", "issn", "oclcnum".
         scope: "everything" for local catalogue + subscribed databases, "catalogue" for local only, "books_videos" for the books/videos scope.
         sort_by: "rank" (relevance, default), "date" (newest first), "title" (alphabetical).
         limit: Number of results to return (1-50, default 10).
