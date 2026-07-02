@@ -789,6 +789,48 @@ def recommend_librarians(
     return matches[:capped_limit]
 
 
+# Subjects shown per profile in the directory listing. Real profiles list
+# dozens of subjects; the listing exists for routing and contact lookup, so
+# it shows a representative sample rather than flooding the caller's context.
+_MAX_LISTED_SUBJECTS = 12
+
+
+def format_librarian_directory(directory: LibrarianDirectory) -> str:
+    """Format the complete configured directory for MCP responses.
+
+    Aliases and keywords are deliberately omitted: they exist for matching,
+    are often machine-expanded, and would drown the fields a caller needs to
+    route a question (best-for areas, subjects, schools, contact).
+    """
+    lines = [
+        "## Configured librarians:",
+        "",
+        f"{len(directory.librarians)} librarian profile(s) are configured.",
+    ]
+    for i, librarian in enumerate(directory.librarians, start=1):
+        lines.append(f"{i}. Name: {_format_linked_name(librarian)}")
+        lines.append(f"   Title: {librarian.title or _UNCONFIGURED}")
+        lines.append(f"   Contact: {librarian.email or _UNCONFIGURED}")
+        schools = _unique(librarian.schools)
+        if schools:
+            lines.append(f"   Schools: {_format_list(schools)}")
+        if librarian.best_for:
+            lines.append(
+                f"   Best for: {_format_best_for_sentence(_unique(librarian.best_for))}"
+            )
+        subjects = _unique(librarian.subjects)
+        if subjects:
+            shown = subjects[:_MAX_LISTED_SUBJECTS]
+            suffix = (
+                f" (+{len(subjects) - len(shown)} more)"
+                if len(subjects) > len(shown)
+                else ""
+            )
+            lines.append(f"   Subjects: {', '.join(shown)}{suffix}")
+    lines.append(_RECOMMENDATION_FOOTER)
+    return "\n".join(lines)
+
+
 def is_semantic_match(match: LibrarianMatch) -> bool:
     """True when a match came from the embedding fallback, not keywords."""
     return match.evidence_fields == ["semantic"]

@@ -59,6 +59,7 @@ pytest tests/ -v
 | `primo_get_record` | Get full details for a record by Primo record ID |
 | `primo_suggest` | Get autocomplete suggestions |
 | `primo_recommend_librarians` | Recommend configured librarian help for a query or selected records |
+| `primo_list_librarians` | List every configured librarian profile with contact and coverage |
 | `primo_cite` | Generate formatted citations |
 | `primo_export` | Export records as BibTeX, RIS, or CSV |
 
@@ -160,10 +161,13 @@ below `PRIMO_LIBRARIAN_SEMANTIC_SECOND_GUESS_SCORE`), so embeddings are
 computed only when keywords are unconvincing. Keyword matches stay primary and
 are never displaced; a passing semantic candidate for a different librarian is
 appended within the limit. It uses Google's `gemini-embedding-001` (free tier —
-get a key at <https://aistudio.google.com/apikey>); all profile texts are
-embedded in a single `batchEmbedContents` request, cached to a sidecar file,
-and recomputed only when a profile, the model, or the output dimensionality
-changes.
+get a key at <https://aistudio.google.com/apikey>). Each profile term is
+embedded as its own vector and a profile scores by its best term (max cosine),
+so a sharp hit on one configured topic is never averaged away by the rest of a
+large profile. Terms are embedded in batched `batchEmbedContents` requests,
+cached to a sidecar file keyed by term content (terms shared by several
+profiles are embedded once), and recomputed only when a term, the model, or
+the output dimensionality changes.
 
 Acceptance is self-calibrating rather than a single tuned constant, with
 three regimes by directory size: with at least
@@ -219,6 +223,11 @@ The `Name` value is always emitted as a Markdown link. The profile `url` is
 used first; if it is missing, the formatter falls back to a `mailto:` link
 when an email address is configured.
 
+When no recommendation clears the confidence threshold, `primo_list_librarians`
+returns the complete configured directory (name, title, contact, schools,
+best-for areas, and a sample of subjects) so a caller can still route the user
+to a real contact without inventing one.
+
 Librarian recommendations require an external JSON file. No real profiles are
 bundled. The minimum shape is:
 
@@ -242,6 +251,26 @@ bundled. The minimum shape is:
   ]
 }
 ```
+
+### Maintaining the profile directory
+
+The `primo-profiles` CLI keeps the JSON directory reproducible from a CSV
+source and reports curation problems that weaken matching:
+
+```bash
+# Build the JSON directory from a CSV source (semicolon- or comma-separated
+# multi-value cells; accepts singular or plural column headers)
+python -m primo_mcp_server.profile_tools convert librarian-profile.csv librarian-profile.json
+
+# Check the configured directory (or an explicit path) for problems:
+# filler-only terms, term variants that normalise identically, terms listed
+# by nearly every profile, unmatchable profiles, missing contact details,
+# and deny-list terms broad enough to always fire
+python -m primo_mcp_server.profile_tools lint
+```
+
+`lint` exits 0 when clean, 1 with findings, and 2 when the directory cannot
+be read, so it can gate a profile-update workflow.
 
 ## Usage Examples
 

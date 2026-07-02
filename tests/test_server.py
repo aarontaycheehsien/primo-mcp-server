@@ -384,3 +384,27 @@ async def test_inline_search_uses_tighter_embedding_timeout(
     assert "Unexpected error" not in output
     assert len(calls) == 1
     assert calls[0]["timeout"] == 2.5
+
+
+async def test_primo_list_librarians_lists_configured_profiles(tmp_path):
+    from primo_mcp_server.server import primo_list_librarians
+
+    output = await primo_list_librarians(
+        _fake_context(
+            config_overrides={"librarians_file": _write_librarians_file(tmp_path)}
+        )
+    )
+
+    assert "## Configured librarians:" in output
+    assert "Accounting Librarian" in output
+    assert "Data Librarian" in output
+    assert "do not invent or substitute names" in output
+
+
+async def test_primo_list_librarians_without_config_returns_guidance():
+    from primo_mcp_server.server import primo_list_librarians
+
+    output = await primo_list_librarians(_fake_context())
+
+    assert output.startswith("Librarian directory unavailable:")
+    assert "PRIMO_LIBRARIANS_FILE" in output

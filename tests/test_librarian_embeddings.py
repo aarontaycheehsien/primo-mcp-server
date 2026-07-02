@@ -297,6 +297,97 @@ async def test_single_profile_directory_uses_floor_only(tmp_path):
     assert [m.librarian.id for m in matches] == ["law"]
 
 
+async def test_padded_profile_matches_by_its_best_term(tmp_path):
+    # A profile listing many unrelated topics must still match sharply on
+    # the one term that fits the query. Under the old single-document
+    # embedding, the padding diluted the cosine (0.5 here) below the floor;
+    # per-term scoring takes the max over terms instead.
+    directory = LibrarianDirectory.model_validate(
+        {
+            "librarians": [
+                {
+                    "id": "padded",
+                    "name": "Padded Librarian",
+                    "subjects": ["law", "accounting", "bibliometric", "preservation"],
+                },
+                {
+                    "id": "law",
+                    "name": "Law Librarian",
+                    "subjects": ["law"],
+                },
+            ]
+        }
+    )
+
+    matches, error, _ = await semantic_fallback(
+        directory,
+        "preservation of digital archives",
+        [],
+        _config(tmp_path, librarian_semantic_min_similarity=0.6),
+        embedder=_FakeEmbedder(),
+    )
+
+    assert error is None
+    assert [m.librarian.id for m in matches] == ["padded"]
+
+
+async def test_shared_terms_are_embedded_once(tmp_path):
+    # Two profiles listing the same term produce one document embedding, not
+    # two: the cache is keyed by term content, not by profile.
+    directory = LibrarianDirectory.model_validate(
+        {
+            "librarians": [
+                {"id": "law1", "name": "Law Librarian One", "subjects": ["law"]},
+                {"id": "law2", "name": "Law Librarian Two", "subjects": ["law"]},
+            ]
+        }
+    )
+    embedder = _FakeEmbedder()
+
+    await semantic_fallback(
+        directory,
+        "law and legislation",
+        [],
+        _config(tmp_path),
+        embedder=embedder,
+    )
+
+    document_calls = [
+        count for count, task in embedder.calls if task == "RETRIEVAL_DOCUMENT"
+    ]
+    assert document_calls == [1]
+
+
+async def test_old_cache_format_is_discarded_and_rebuilt(tmp_path):
+    # A version-1 sidecar (one vector per profile, keyed by librarian id) is
+    # from before per-term scoring; it must be ignored, not misread.
+    config = _config(tmp_path)
+    (tmp_path / "embeddings.json").write_text(
+        json.dumps(
+            {
+                "model": "gemini-embedding-001",
+                "entries": {
+                    "law": {"hash": "stale", "vector": [0.0, 1.0, 0.0, 0.0, 0.0]}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    embedder = _FakeEmbedder()
+
+    matches, error, _ = await semantic_fallback(
+        _directory(),
+        "digital preservation of archives",
+        [],
+        config,
+        embedder=embedder,
+    )
+
+    assert error is None
+    assert any(task == "RETRIEVAL_DOCUMENT" for _, task in embedder.calls)
+    assert [m.librarian.id for m in matches] == ["preservation"]
+
+
 async def test_profile_embeddings_are_cached_and_reused(tmp_path):
     config = _config(tmp_path)
     directory = _directory()

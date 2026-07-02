@@ -18,10 +18,16 @@ Design guarantees:
   matches must exceed the mean similarity across all profiles by a margin,
   which adapts to the anisotropy of the embedding space and to directory
   size instead of trusting a single institution-tuned constant.
-- Profile embeddings are cached to a sidecar file keyed by a content hash and
-  the model id (plus output dimensionality), so the (paid/slow) document
-  embeddings are computed once and re-used until a profile, the model, or the
-  dimensionality changes.
+- Each profile term is embedded as its own vector and a profile scores by
+  its best term (max cosine). Averaging a large profile into one document
+  vector dilutes every topic it lists -- a profile with 150 aliases would
+  need the whole bag to resemble the query -- whereas the routing question
+  is whether ANY configured topic matches.
+- Term embeddings are cached to a sidecar file keyed by a content hash of
+  each term and the model id (plus output dimensionality), so the
+  (paid/slow) document embeddings are computed once and re-used until a
+  term, the model, or the dimensionality changes. Terms shared by several
+  profiles are embedded once.
 """
 
 from __future__ import annotations
@@ -80,12 +86,13 @@ class ProfileSimilarity(NamedTuple):
     librarian: LibrarianProfile
 
 
-def _profile_text(librarian: LibrarianProfile) -> str:
-    """Build the topical document embedded for a librarian.
+def _profile_texts(librarian: LibrarianProfile) -> list[str]:
+    """Topical text units embedded for a librarian, one vector each.
 
-    Name and title are deliberately excluded -- they carry little topical
-    signal and risk spurious matches (e.g. a query mentioning a person's
-    name).
+    Every configured term (and the notes prose, as one unit) becomes its own
+    embedding; the profile later scores by its best term. Name and title are
+    deliberately excluded -- they carry little topical signal and risk
+    spurious matches (e.g. a query mentioning a person's name).
     """
     parts = [
         librarian.notes,
@@ -96,7 +103,15 @@ def _profile_text(librarian: LibrarianProfile) -> str:
         *librarian.schools,
         *librarian.resource_types,
     ]
-    return " | ".join(p.strip() for p in parts if p and p.strip())
+    seen: set[str] = set()
+    texts: list[str] = []
+    for part in parts:
+        cleaned = part.strip() if part else ""
+        key = cleaned.casefold()
+        if cleaned and key not in seen:
+            seen.add(key)
+            texts.append(cleaned)
+    return texts
 
 
 def _query_text(query: str, records: list[PrimoRecord] | None) -> str:
@@ -138,29 +153,35 @@ def _cache_path(config: PrimoConfig) -> Path | None:
     return None
 
 
+# Sidecar cache layout version. Version 2 keys entries by a content hash of
+# each term text; version 1 (one document vector per profile, keyed by
+# librarian id) is silently discarded and rebuilt on first use.
+_CACHE_FORMAT = 2
+
+
 def _read_cache(path: Path | None) -> dict:
     if path is None:
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+    if not isinstance(data, dict) or data.get("format") != _CACHE_FORMAT:
+        return {}
+    return data
 
 
 def _write_cache(
     path: Path | None,
     model_key: str,
-    vectors: dict[str, list[float]],
-    hashes: dict[str, str],
+    vectors_by_hash: dict[str, list[float]],
 ) -> None:
     if path is None:
         return
     data = {
         "model": model_key,
-        "entries": {
-            lib_id: {"hash": hashes.get(lib_id, ""), "vector": vec}
-            for lib_id, vec in vectors.items()
-        },
+        "format": _CACHE_FORMAT,
+        "entries": vectors_by_hash,
     }
     try:
         path.write_text(json.dumps(data), encoding="utf-8")
@@ -221,34 +242,49 @@ async def _load_or_build_profile_vectors(
     directory: LibrarianDirectory,
     config: PrimoConfig,
     embed: Embedder,
-) -> dict[str, list[float]]:
-    """Return one embedding per librarian, re-using a sidecar cache."""
+) -> dict[str, list[list[float]]]:
+    """Return one embedding per profile term, re-using a sidecar cache.
+
+    The cache is keyed by a content hash of each term text, so a term shared
+    by several profiles is embedded and stored once, and editing one term on
+    one profile re-embeds only that term.
+    """
     path = _cache_path(config)
     cache = _read_cache(path)
     model_key = _model_key(config)
     entries = cache.get("entries", {}) if cache.get("model") == model_key else {}
 
-    vectors: dict[str, list[float]] = {}
-    hashes: dict[str, str] = {}
-    stale: list[tuple[str, str]] = []
-    for librarian in directory.librarians:
-        text = _profile_text(librarian)
-        if not text:
-            continue
-        digest = _hash(text, model_key)
-        hashes[librarian.id] = digest
-        cached = entries.get(librarian.id)
-        if cached and cached.get("hash") == digest and cached.get("vector"):
-            vectors[librarian.id] = cached["vector"]
-        else:
-            stale.append((librarian.id, text))
+    texts_by_profile = {
+        librarian.id: _profile_texts(librarian)
+        for librarian in directory.librarians
+    }
+    vectors_by_hash: dict[str, list[float]] = {}
+    pending: dict[str, str] = {}
+    for texts in texts_by_profile.values():
+        for text in texts:
+            digest = _hash(text, model_key)
+            cached_vector = entries.get(digest)
+            if cached_vector:
+                vectors_by_hash[digest] = cached_vector
+            else:
+                pending.setdefault(digest, text)
 
-    if stale:
-        new_vectors = await embed([text for _, text in stale], _TASK_DOCUMENT)
-        for (lib_id, _), vector in zip(stale, new_vectors):
-            vectors[lib_id] = vector
-        _write_cache(path, model_key, vectors, hashes)
-    return vectors
+    if pending:
+        ordered = list(pending.items())
+        new_vectors = await embed([text for _, text in ordered], _TASK_DOCUMENT)
+        for (digest, _), vector in zip(ordered, new_vectors):
+            vectors_by_hash[digest] = vector
+        # Rewriting only the hashes in use prunes vectors for removed terms.
+        _write_cache(path, model_key, vectors_by_hash)
+
+    return {
+        lib_id: [
+            vectors_by_hash[digest]
+            for text in texts
+            if (digest := _hash(text, model_key)) in vectors_by_hash
+        ]
+        for lib_id, texts in texts_by_profile.items()
+    }
 
 
 async def score_profiles(
@@ -261,6 +297,12 @@ async def score_profiles(
 ) -> list[ProfileSimilarity]:
     """Cosine similarity of every embeddable profile to ``query``, unsorted.
 
+    A profile's similarity is the maximum over its per-term vectors: the
+    routing question is whether any configured topic matches the query, so a
+    sharp hit on one term must not be averaged away by the profile's other
+    topics. A stray term causing a false positive is a curation problem --
+    the profile lint tool flags candidates and ``excludes`` patches them.
+
     Raises on embedding failure; ``semantic_fallback`` wraps this with the
     fail-closed handling, while the calibration CLI lets errors propagate.
     """
@@ -270,13 +312,16 @@ async def score_profiles(
         )
     )
     profile_vectors = await _load_or_build_profile_vectors(directory, config, embed)
-    if not profile_vectors:
+    if not any(profile_vectors.values()):
         return []
     query_vector = (await embed([_query_text(query, None)], _TASK_QUERY))[0]
     return [
-        ProfileSimilarity(_cosine(query_vector, vector), librarian)
+        ProfileSimilarity(
+            max(_cosine(query_vector, vector) for vector in vectors),
+            librarian,
+        )
         for librarian in directory.librarians
-        if (vector := profile_vectors.get(librarian.id))
+        if (vectors := profile_vectors.get(librarian.id))
     ]
 
 

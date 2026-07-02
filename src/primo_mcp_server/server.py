@@ -18,6 +18,7 @@ from primo_mcp_server.formatter import (
 from primo_mcp_server.librarian_embeddings import semantic_fallback
 from primo_mcp_server.librarians import (
     _MAX_RECOMMENDATIONS,
+    format_librarian_directory,
     format_librarian_recommendations,
     load_librarian_directory_cached,
     looks_like_identifier,
@@ -56,8 +57,9 @@ mcp = FastMCP(
         "user explicitly asks for web confirmation. "
         "Use primo_search for queries, primo_get_record for full details, "
         "primo_suggest for autocomplete, primo_recommend_librarians for "
-        "validated librarian recommendations, primo_cite for citations, "
-        "and primo_export for BibTeX/RIS/CSV export. Librarian "
+        "validated librarian recommendations, primo_list_librarians for "
+        "the full configured librarian directory, primo_cite for "
+        "citations, and primo_export for BibTeX/RIS/CSV export. Librarian "
         "recommendations are limited to configured profile IDs; do not "
         "invent or substitute names."
     ),
@@ -424,7 +426,37 @@ async def primo_recommend_librarians(
 
 
 # ---------------------------------------------------------------------------
-# Tool 5: primo_cite
+# Tool 5: primo_list_librarians
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def primo_list_librarians(ctx: Context) -> str:
+    """List every configured SMU librarian profile.
+
+    Use this when librarian recommendation returns no match but the user
+    still wants a contact, or when the user asks who the librarians are and
+    what they cover. The list is the complete configured directory: only
+    these names may be presented; never invent or substitute names.
+
+    Returns:
+        All configured librarian profiles with title, contact, schools,
+        best-for areas, and a sample of subjects, or configuration guidance
+        when no directory is configured.
+    """
+    try:
+        config = _get_config(ctx)
+        directory, message, _ = load_librarian_directory_cached(
+            config.librarians_file
+        )
+        if message or directory is None:
+            return f"Librarian directory unavailable: {message}"
+        return format_librarian_directory(directory)
+    except Exception as e:
+        return f"Unexpected error: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Tool 6: primo_cite
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
@@ -470,7 +502,7 @@ async def primo_cite(
 
 
 # ---------------------------------------------------------------------------
-# Tool 6: primo_export
+# Tool 7: primo_export
 # ---------------------------------------------------------------------------
 
 @mcp.tool()

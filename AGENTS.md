@@ -24,8 +24,9 @@ This is the canonical agent guidance file for this fork.
 - `src/primo_mcp_server/citations.py` -- Citation formatting (APA7, Harvard, Chicago, IEEE, Vancouver)
 - `src/primo_mcp_server/exporters.py` -- BibTeX, RIS, CSV export
 - `src/primo_mcp_server/librarians.py` -- Librarian directory loading and keyword recommendation matching
-- `src/primo_mcp_server/librarian_embeddings.py` -- Optional Gemini embedding semantic fallback for recommendations
+- `src/primo_mcp_server/librarian_embeddings.py` -- Optional Gemini embedding semantic fallback for recommendations (per-term vectors, max cosine per profile)
 - `src/primo_mcp_server/calibrate_embeddings.py` -- CLI for calibrating semantic fallback thresholds
+- `src/primo_mcp_server/profile_tools.py` -- Curator CLI: convert a CSV profile source to JSON and lint the directory
 
 ## Running Tests
 
@@ -83,7 +84,9 @@ Recommendations are validated against the configured JSON profile
 directory. Only configured librarian names may be returned; never invent
 or substitute names. `primo_recommend_librarians` is the explicit tool;
 `primo_search` appends inline recommendations by default (suppress with
-`recommend_librarians=false`). Deterministic keyword matching runs first,
+`recommend_librarians=false`); `primo_list_librarians` returns the complete
+configured directory when no recommendation clears the threshold or when
+the user asks who the librarians are. Deterministic keyword matching runs first,
 with an optional Gemini embedding fallback when keyword matches are weak
 or absent. Identifier-shaped queries (DOI, ISBN, ISSN, record IDs) skip
 recommendations entirely. Recommendation counts are capped at 3.

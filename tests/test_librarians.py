@@ -1146,3 +1146,43 @@ def test_format_recommendations_surfaces_semantic_skip_on_no_match():
     assert "Status: no_match" in output
     assert "semantic fallback was skipped" in output
     assert "too few topical words" in output
+
+
+def test_format_librarian_directory_lists_every_profile():
+    from primo_mcp_server.librarians import format_librarian_directory
+
+    output = format_librarian_directory(_directory())
+
+    assert "## Configured librarians:" in output
+    assert "2 librarian profile(s) are configured." in output
+    assert "[Accounting Librarian](https://library.example.edu/accounting)" in output
+    assert "Best for: Consult for accounting datasets and audit research." in output
+    assert "Schools: School of Accountancy" in output
+    # A profile without url or email still renders as a link (to "#").
+    assert "[Law Librarian](#)" in output
+    assert "do not invent or substitute names" in output
+    # Matching-only fields stay out of the listing.
+    assert "financial reporting" not in output
+    assert "legal research" not in output
+
+
+def test_format_librarian_directory_caps_listed_subjects():
+    from primo_mcp_server.librarians import format_librarian_directory
+
+    directory = LibrarianDirectory.model_validate(
+        {
+            "librarians": [
+                {
+                    "id": "broad",
+                    "name": "Broad Librarian",
+                    "subjects": [f"subject {i}" for i in range(15)],
+                }
+            ]
+        }
+    )
+
+    output = format_librarian_directory(directory)
+
+    assert "subject 11" in output
+    assert "subject 12" not in output
+    assert "(+3 more)" in output
