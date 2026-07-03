@@ -419,6 +419,22 @@ async def test_old_cache_format_is_discarded_and_rebuilt(tmp_path):
     assert [m.librarian.id for m in matches] == ["preservation"]
 
 
+def test_profile_texts_dedupe_normalising_variants():
+    from primo_mcp_server.librarian_embeddings import _profile_texts
+    from primo_mcp_server.librarians import LibrarianProfile
+
+    librarian = LibrarianProfile(
+        id="fin",
+        name="Finance Librarian",
+        subjects=["Financial databases", "financial database", "law"],
+        keywords=["LAW"],
+    )
+
+    # Case and plural variants of one concept embed once (the first-listed
+    # spelling wins); genuinely distinct terms are kept.
+    assert _profile_texts(librarian) == ["Financial databases", "law"]
+
+
 def test_retry_delay_prefers_server_advice():
     # Retry-After header wins.
     header = _http_error(headers={"retry-after": "7"})

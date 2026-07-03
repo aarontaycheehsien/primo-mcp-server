@@ -49,6 +49,7 @@ from primo_mcp_server.librarians import (
     LibrarianMatch,
     LibrarianProfile,
     _content_token_count,
+    _normalise_text,
     is_excluded,
 )
 from primo_mcp_server.models import PrimoRecord
@@ -94,6 +95,11 @@ def _profile_texts(librarian: LibrarianProfile) -> list[str]:
     embedding; the profile later scores by its best term. Name and title are
     deliberately excluded -- they carry little topical signal and risk
     spurious matches (e.g. a query mentioning a person's name).
+
+    Terms are de-duplicated by their normalised form, the same reduction the
+    keyword matcher scores by: real profiles list case and plural variants
+    of one concept ("Financial databases" / "financial database"), and
+    embedding each variant buys near-identical vectors at real quota cost.
     """
     parts = [
         librarian.notes,
@@ -108,8 +114,10 @@ def _profile_texts(librarian: LibrarianProfile) -> list[str]:
     texts: list[str] = []
     for part in parts:
         cleaned = part.strip() if part else ""
-        key = cleaned.casefold()
-        if cleaned and key not in seen:
+        if not cleaned:
+            continue
+        key = _normalise_text(cleaned) or cleaned.casefold()
+        if key not in seen:
             seen.add(key)
             texts.append(cleaned)
     return texts
