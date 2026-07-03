@@ -32,6 +32,7 @@ Design guarantees:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -238,10 +239,77 @@ async def _gemini_embed(
     return vectors
 
 
+# Indirection so tests can observe and skip real sleeps.
+_sleep = asyncio.sleep
+
+
+def _retry_delay_seconds(
+    error: httpx.HTTPStatusError, attempt: int, cap: float
+) -> float:
+    """How long a 429 asks us to wait, capped; backoff when it does not say.
+
+    Google's rate-limit responses carry the delay in the ``Retry-After``
+    header and/or a ``google.rpc.RetryInfo`` detail in the JSON body (e.g.
+    ``"retryDelay": "37s"``). Honouring the server's own number converges
+    much faster than blind exponential backoff.
+    """
+    retry_after = error.response.headers.get("retry-after")
+    if retry_after:
+        try:
+            return min(cap, max(1.0, float(retry_after)))
+        except ValueError:
+            pass
+    try:
+        details = error.response.json()["error"]["details"]
+        for detail in details:
+            if detail.get("@type", "").endswith("RetryInfo"):
+                delay = str(detail.get("retryDelay", ""))
+                if delay.endswith("s"):
+                    return min(cap, max(1.0, float(delay[:-1])))
+    except Exception:
+        pass
+    return min(cap, 5.0 * (2**attempt))
+
+
+async def _embed_with_retry(
+    embed: Embedder,
+    texts: Sequence[str],
+    task_type: str,
+    config: PrimoConfig,
+    *,
+    retries: int,
+) -> list[list[float]]:
+    """Call ``embed``, waiting out HTTP 429 up to ``retries`` times.
+
+    Only rate limiting is retried -- auth failures, malformed responses,
+    and network errors still fail immediately (and closed, in the caller).
+    """
+    for attempt in range(max(0, retries) + 1):
+        try:
+            return await embed(texts, task_type)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 429 or attempt >= retries:
+                raise
+            delay = _retry_delay_seconds(
+                e, attempt, config.embedding_retry_max_delay
+            )
+            logger.warning(
+                "Gemini embedding rate limited (429); waiting %.0fs before "
+                "retry %d/%d",
+                delay,
+                attempt + 1,
+                retries,
+            )
+            await _sleep(delay)
+    raise AssertionError("unreachable")  # loop always returns or raises
+
+
 async def _load_or_build_profile_vectors(
     directory: LibrarianDirectory,
     config: PrimoConfig,
     embed: Embedder,
+    *,
+    retries: int = 0,
 ) -> dict[str, list[list[float]]]:
     """Return one embedding per profile term, re-using a sidecar cache.
 
@@ -278,8 +346,12 @@ async def _load_or_build_profile_vectors(
         # the hashes in use also prunes vectors for removed terms.
         for start in range(0, len(ordered), _MAX_BATCH_SIZE):
             chunk = ordered[start : start + _MAX_BATCH_SIZE]
-            new_vectors = await embed(
-                [text for _, text in chunk], _TASK_DOCUMENT
+            new_vectors = await _embed_with_retry(
+                embed,
+                [text for _, text in chunk],
+                _TASK_DOCUMENT,
+                config,
+                retries=retries,
             )
             for (digest, _), vector in zip(chunk, new_vectors):
                 vectors_by_hash[digest] = vector
@@ -302,6 +374,7 @@ async def score_profiles(
     *,
     embedder: Embedder | None = None,
     timeout: float | None = None,
+    retries: int | None = None,
 ) -> list[ProfileSimilarity]:
     """Cosine similarity of every embeddable profile to ``query``, unsorted.
 
@@ -311,18 +384,29 @@ async def score_profiles(
     topics. A stray term causing a false positive is a curation problem --
     the profile lint tool flags candidates and ``excludes`` patches them.
 
+    ``retries`` bounds how many times an HTTP 429 is waited out (None means
+    ``config.embedding_retry_attempts``); pass 0 on latency-bounded paths.
+
     Raises on embedding failure; ``semantic_fallback`` wraps this with the
     fail-closed handling, while the calibration CLI lets errors propagate.
     """
+    if retries is None:
+        retries = config.embedding_retry_attempts
     embed = embedder or (
         lambda texts, task_type: _gemini_embed(
             texts, task_type, config=config, timeout=timeout
         )
     )
-    profile_vectors = await _load_or_build_profile_vectors(directory, config, embed)
+    profile_vectors = await _load_or_build_profile_vectors(
+        directory, config, embed, retries=retries
+    )
     if not any(profile_vectors.values()):
         return []
-    query_vector = (await embed([_query_text(query, None)], _TASK_QUERY))[0]
+    query_vector = (
+        await _embed_with_retry(
+            embed, [_query_text(query, None)], _TASK_QUERY, config, retries=retries
+        )
+    )[0]
     return [
         ProfileSimilarity(
             max(_cosine(query_vector, vector) for vector in vectors),
@@ -387,7 +471,9 @@ async def semantic_fallback(
     "the fallback broke" from "the fallback found nothing".
 
     ``timeout`` overrides ``config.embedding_timeout`` for latency-sensitive
-    callers such as the inline primo_search path.
+    callers such as the inline primo_search path; a caller that sets it also
+    opts out of 429 retry waits, since sleeping would blow the same budget
+    the tight timeout protects.
     """
     if not config.librarian_semantic_fallback:
         return SemanticFallbackResult([])
@@ -412,6 +498,7 @@ async def semantic_fallback(
             config,
             embedder=embedder,
             timeout=timeout,
+            retries=0 if timeout is not None else None,
         )
     except Exception as e:
         logger.warning(

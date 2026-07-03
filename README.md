@@ -148,6 +148,8 @@ environment variables:
 | `PRIMO_EMBEDDING_CACHE_FILE` | next to `PRIMO_LIBRARIANS_FILE` | Where profile embeddings are cached |
 | `PRIMO_EMBEDDING_TIMEOUT` | `10.0` | HTTP timeout for embedding requests in seconds |
 | `PRIMO_EMBEDDING_INLINE_TIMEOUT` | `2.5` | Tighter embedding budget for inline `primo_search` recommendations |
+| `PRIMO_EMBEDDING_RETRY_ATTEMPTS` | `3` | How many times an HTTP 429 is waited out and retried (never on the inline path) |
+| `PRIMO_EMBEDDING_RETRY_MAX_DELAY` | `65.0` | Cap in seconds on the wait honoured from the server's `Retry-After`/`RetryInfo` advice |
 
 See `.env.example` for a commented template.
 
@@ -167,7 +169,11 @@ so a sharp hit on one configured topic is never averaged away by the rest of a
 large profile. Terms are embedded in batched `batchEmbedContents` requests,
 cached to a sidecar file keyed by term content (terms shared by several
 profiles are embedded once), and recomputed only when a term, the model, or
-the output dimensionality changes.
+the output dimensionality changes. The cache is written after every batch,
+so a rate-limited cold rebuild keeps its progress; rate-limit responses
+(HTTP 429) are waited out and retried, honouring the API's own
+`Retry-After`/`RetryInfo` advice, except on the latency-bounded inline
+`primo_search` path, which fails closed fast instead of sleeping.
 
 Acceptance is self-calibrating rather than a single tuned constant, with
 three regimes by directory size: with at least

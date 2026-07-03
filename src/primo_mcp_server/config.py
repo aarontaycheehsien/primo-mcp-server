@@ -94,3 +94,12 @@ class PrimoConfig(BaseSettings):
     # call cannot add the full embedding_timeout to every ordinary search.
     # The explicit primo_recommend_librarians tool keeps the full budget.
     embedding_inline_timeout: float = 2.5
+    # Rate-limit resilience: on HTTP 429 an embedding call waits (honouring
+    # the server's Retry-After header or RetryInfo body when present, capped
+    # at embedding_retry_max_delay) and retries up to this many times before
+    # failing closed. Free-tier quotas replenish per minute, so a cap below
+    # 60 would make honouring the server's advice pointless. Retries never
+    # run on the inline primo_search path, which has a hard latency budget;
+    # a search fails closed fast rather than sleeping.
+    embedding_retry_attempts: int = 3
+    embedding_retry_max_delay: float = 65.0

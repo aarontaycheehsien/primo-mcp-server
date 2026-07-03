@@ -8,9 +8,40 @@ import httpx
 import respx
 
 from primo_mcp_server.config import PrimoConfig
-from primo_mcp_server.librarian_embeddings import _gemini_embed, semantic_fallback
+from primo_mcp_server.librarian_embeddings import (
+    _gemini_embed,
+    _retry_delay_seconds,
+    semantic_fallback,
+)
 from primo_mcp_server.librarians import LibrarianDirectory
 from primo_mcp_server.models import PrimoRecord
+
+
+def _http_error(
+    status: int = 429,
+    headers: dict | None = None,
+    json_body: dict | None = None,
+) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://example.test/embed")
+    if json_body is not None:
+        response = httpx.Response(
+            status, headers=headers, json=json_body, request=request
+        )
+    else:
+        response = httpx.Response(status, headers=headers, request=request)
+    return httpx.HTTPStatusError(str(status), request=request, response=response)
+
+
+def _record_sleeps(monkeypatch) -> list[float]:
+    sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(
+        "primo_mcp_server.librarian_embeddings._sleep", fake_sleep
+    )
+    return sleeps
 
 # A tiny deterministic "embedding" space: one dimension per topic. A text's
 # vector marks which topics it mentions, so cosine similarity recovers topical
@@ -386,6 +417,110 @@ async def test_old_cache_format_is_discarded_and_rebuilt(tmp_path):
     assert error is None
     assert any(task == "RETRIEVAL_DOCUMENT" for _, task in embedder.calls)
     assert [m.librarian.id for m in matches] == ["preservation"]
+
+
+def test_retry_delay_prefers_server_advice():
+    # Retry-After header wins.
+    header = _http_error(headers={"retry-after": "7"})
+    assert _retry_delay_seconds(header, attempt=0, cap=65.0) == 7.0
+
+    # Google's RetryInfo body detail is honoured when the header is absent.
+    body = _http_error(
+        json_body={
+            "error": {
+                "details": [
+                    {
+                        "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                        "retryDelay": "37s",
+                    }
+                ]
+            }
+        }
+    )
+    assert _retry_delay_seconds(body, attempt=0, cap=65.0) == 37.0
+
+    # No advice: exponential backoff, capped.
+    silent = _http_error()
+    assert _retry_delay_seconds(silent, attempt=0, cap=65.0) == 5.0
+    assert _retry_delay_seconds(silent, attempt=4, cap=65.0) == 65.0
+
+    # Advice above the cap is clamped.
+    slow = _http_error(headers={"retry-after": "600"})
+    assert _retry_delay_seconds(slow, attempt=0, cap=65.0) == 65.0
+
+
+async def test_rate_limited_rebuild_waits_and_retries(tmp_path, monkeypatch):
+    sleeps = _record_sleeps(monkeypatch)
+
+    class _RateLimitedOnce(_FakeEmbedder):
+        def __init__(self):
+            super().__init__()
+            self.failures = 0
+
+        async def __call__(self, texts, task_type):
+            if task_type == "RETRIEVAL_DOCUMENT" and self.failures == 0:
+                self.failures += 1
+                raise _http_error(headers={"retry-after": "7"})
+            return await super().__call__(texts, task_type)
+
+    matches, error, _ = await semantic_fallback(
+        _directory(),
+        "digital preservation of archives",
+        [],
+        _config(tmp_path),
+        embedder=_RateLimitedOnce(),
+    )
+
+    # The 429 was waited out for exactly the advised delay and the call
+    # succeeded on the retry instead of failing closed.
+    assert error is None
+    assert [m.librarian.id for m in matches] == ["preservation"]
+    assert sleeps == [7.0]
+
+
+async def test_tight_timeout_opts_out_of_retry_waits(tmp_path, monkeypatch):
+    sleeps = _record_sleeps(monkeypatch)
+
+    async def always_rate_limited(texts, task_type):
+        raise _http_error(headers={"retry-after": "60"})
+
+    matches, error, _ = await semantic_fallback(
+        _directory(),
+        "digital preservation of archives",
+        [],
+        _config(tmp_path),
+        embedder=always_rate_limited,
+        timeout=2.5,  # the inline primo_search budget
+    )
+
+    # A latency-bounded caller fails closed immediately; sleeping 60s inside
+    # an ordinary search would blow the very budget the timeout protects.
+    assert matches == []
+    assert error == "HTTPStatusError"
+    assert sleeps == []
+
+
+async def test_non_rate_limit_http_errors_are_not_retried(tmp_path, monkeypatch):
+    sleeps = _record_sleeps(monkeypatch)
+    calls: list[str] = []
+
+    async def unauthorized(texts, task_type):
+        calls.append(task_type)
+        raise _http_error(status=401)
+
+    matches, error, _ = await semantic_fallback(
+        _directory(),
+        "digital preservation of archives",
+        [],
+        _config(tmp_path),
+        embedder=unauthorized,
+    )
+
+    # Retrying an invalid API key would never succeed; fail closed at once.
+    assert matches == []
+    assert error == "HTTPStatusError"
+    assert sleeps == []
+    assert len(calls) == 1
 
 
 async def test_failed_rebuild_keeps_progress_and_resumes(tmp_path):
