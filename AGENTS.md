@@ -80,6 +80,20 @@ the search was widened.
 For books, databases, and videos, default to `scope="catalogue"`. For
 articles, default to `scope="everything"`.
 
+For dataset or data-source requests, start with `scope="catalogue"` and
+`resource_type="databases"` to find subscribed data platforms first. Expand
+to articles or books only after database results are weak, irrelevant, or
+empty, and say that the search was expanded beyond databases.
+
+For any zero-result search, reason about why the query failed and call
+`primo_search` again with revised queries up to five total attempts. Good
+retries may broaden an over-specific phrase, use synonyms or related
+concepts, try singular/plural variants, switch fields, relax filters, or
+widen scope when permitted. Retries may also search directly for likely
+database names or use OR queries for close alternatives. When summarising,
+combine all relevant results found across attempts and report the attempted
+queries.
+
 ## Librarian Recommendation Policy
 
 Recommendations are validated against the configured JSON profile

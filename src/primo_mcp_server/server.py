@@ -48,7 +48,12 @@ mcp = FastMCP(
         "results and the user did not ask for catalogue-only results, retry "
         "with scope='everything' and say that you widened the search. "
         "For books, databases, and videos, default to scope='catalogue'. "
-        "For articles, default to scope='everything'. For confirmation "
+        "For articles, default to scope='everything'. For dataset or "
+        "data-source requests, start with scope='catalogue' and "
+        "resource_type='databases' to find subscribed data platforms first; "
+        "only expand to articles or books after the database pass is weak, "
+        "irrelevant, or empty, and say that you expanded beyond databases. "
+        "For confirmation "
         "requests about whether the library has, owns, subscribes to, or "
         "provides access to a title, use Primo as the evidence source and "
         "do not use websites, LibGuides, or general web pages unless the "
@@ -59,7 +64,16 @@ mcp = FastMCP(
         "the full configured librarian directory, primo_cite for "
         "citations, and primo_export for BibTeX/RIS/CSV export. Librarian "
         "recommendations are limited to configured profile IDs; do not "
-        "invent or substitute names."
+        "invent or substitute names. When a primo_search call returns zero "
+        "results, callers should reason about why the query failed and may "
+        "iteratively call primo_search with revised queries up to five total "
+        "attempts. Retry by broadening overly specific phrases, using "
+        "synonyms or related concepts, trying singular/plural variants, "
+        "switching fields where justified, relaxing filters, or widening "
+        "scope according to the scope policy. Callers may also search "
+        "directly for likely database names and use OR queries when that "
+        "helps cover close alternatives. Combine all relevant results found "
+        "across attempts, and report the attempted queries when summarising."
     ),
     lifespan=app_lifespan,
 )
@@ -159,10 +173,22 @@ async def primo_search(
       widened.
     - For books, databases, and videos, default to scope="catalogue".
     - For articles, default to scope="everything".
+    - For dataset or data-source requests, first search subscribed databases
+      with scope="catalogue" and resource_type="databases". Only after
+      database results are weak, irrelevant, or empty should callers expand
+      to articles or books, and they should state that expansion.
     - For confirmation requests about whether the library has, owns,
       subscribes to, or provides access to a title, use Primo as the
       evidence source. Do not rely on websites, LibGuides, or general web
       pages unless the user explicitly asks for web confirmation.
+    - When a search returns zero results, the caller should reason about
+      why the query failed and call primo_search again with revised queries
+      up to five total attempts. Try broader concepts, synonyms, related
+      disciplines, singular/plural variants, alternate fields, relaxed
+      filters, scope widening where the scope policy permits, direct
+      searches for likely database names, or OR queries for close
+      alternatives. Combine relevant results from all attempts when
+      summarising.
 
     Args:
         query: Search terms (e.g. "machine learning entrepreneurship").

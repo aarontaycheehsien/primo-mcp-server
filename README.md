@@ -77,7 +77,10 @@ Recommended caller policy:
 
 - For books, databases, and videos, start with `scope="catalogue"`.
 - For articles, start with `scope="everything"`.
+- For dataset or data-source requests, start with `scope="catalogue"` and `resource_type="databases"` to find subscribed data platforms first. Expand to articles or books only after database results are weak, irrelevant, or empty, and say that the search was expanded beyond databases.
 - For catalogue searches with no results, retry with `scope="everything"` only when the user did not ask for catalogue-only results.
+- For any zero-result search, reason about why the query failed and try revised `primo_search` calls up to five total attempts. Good retries may broaden an over-specific phrase, use synonyms or related concepts, try singular/plural variants, switch fields, relax filters, widen scope when permitted, search directly for likely database names, or use OR queries for close alternatives.
+- When summarising an iterative search, combine all relevant results found across attempts and report the attempted queries.
 - For access or subscription checks, use Primo results as the evidence source rather than websites or LibGuides.
 
 ## SMU Configuration

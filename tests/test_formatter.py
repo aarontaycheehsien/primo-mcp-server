@@ -42,6 +42,13 @@ class TestFormatSearchResults:
         assert "Queries run:" in output
         assert "- No results: [any,contains,xyzzyplugh99999](" in output
         assert "Suggestions" in output
+        assert "Iterative search guidance:" in output
+        assert "Try up to five total attempts" in output
+        assert "start retries with catalogue databases" in output
+        assert 'resource_type="databases"' in output
+        assert "direct searches for likely database names" in output
+        assert "OR queries for close alternatives" in output
+        assert "combine all relevant results found across attempts" in output
         assert output.index("Queries run:") < output.index("Suggestions")
 
     def test_contains_record_ids(self, search_results_data):

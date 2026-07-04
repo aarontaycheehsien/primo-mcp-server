@@ -15,22 +15,35 @@ from primo_mcp_server.server import (
 
 
 class _FakeClient:
-    def __init__(self, records: list[PrimoRecord] | None = None):
-        self.records = records or [
-            PrimoRecord(
-                record_id="alma123",
-                title="Executive Compensation Data",
-                resource_type="database",
-                subjects=["Accounting", "Executive compensation"],
-                keywords=["Corporate governance"],
-            )
-        ]
+    def __init__(
+        self,
+        records: list[PrimoRecord] | None = None,
+        records_by_query: dict[str, list[PrimoRecord]] | None = None,
+    ):
+        self.records = (
+            records
+            if records is not None
+            else [
+                PrimoRecord(
+                    record_id="alma123",
+                    title="Executive Compensation Data",
+                    resource_type="database",
+                    subjects=["Accounting", "Executive compensation"],
+                    keywords=["Corporate governance"],
+                )
+            ]
+        )
+        self.records_by_query = records_by_query or {}
+        self.search_calls: list[dict] = []
 
     async def search(self, **kwargs) -> SearchResponse:
+        self.search_calls.append(kwargs)
+        query = kwargs.get("query", "")
+        records = self.records_by_query.get(query, self.records)
         return SearchResponse.model_validate(
             {
-                "info": {"total": len(self.records)},
-                "records": self.records,
+                "info": {"total": len(records)},
+                "records": records,
             }
         )
 
@@ -170,6 +183,36 @@ async def test_primo_search_respects_inline_recommendation_config(tmp_path):
 
     assert "Executive Compensation Data" in output
     assert "## Recommended librarian help:" not in output
+
+
+async def test_primo_search_zero_results_guides_llm_iteration():
+    client = _FakeClient(records=[])
+
+    output = await primo_search(
+        _fake_context(client=client),
+        "autism",
+        resource_type="databases",
+        recommend_librarians=False,
+    )
+
+    assert [call["query"] for call in client.search_calls] == ["autism"]
+    assert 'No results found for "autism".' in output
+    assert "Iterative search guidance:" in output
+    assert "Try up to five total attempts" in output
+    assert "start retries with catalogue databases" in output
+    assert 'resource_type="databases"' in output
+    assert "direct searches for likely database names" in output
+    assert "OR queries for close alternatives" in output
+    assert "combine all relevant results found across attempts" in output
+
+
+def test_primo_search_docstring_documents_dataset_database_first_policy():
+    doc = primo_search.__doc__ or ""
+
+    assert "For dataset or data-source requests" in doc
+    assert 'scope="catalogue"' in doc
+    assert 'resource_type="databases"' in doc
+    assert "to articles or books" in doc
 
 
 async def test_primo_get_record_smoke_does_not_return_unexpected_error():
