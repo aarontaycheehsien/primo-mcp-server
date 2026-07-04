@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import time
@@ -76,6 +77,7 @@ class PrimoClient:
         self._config = config
         self._guest_jwt_token: str | None = None
         self._guest_jwt_expiry: float = 0.0
+        self._guest_jwt_lock = asyncio.Lock()
 
     # -- Guest JWT handling -------------------------------------------------
     #
@@ -111,45 +113,54 @@ class PrimoClient:
             return None
 
     async def _guest_jwt(self, force_refresh: bool = False) -> str:
-        """Return a cached anonymous guest JWT, fetching one when needed."""
-        now = time.monotonic()
-        if (
-            not force_refresh
-            and self._guest_jwt_token
-            and now < self._guest_jwt_expiry
-        ):
-            return self._guest_jwt_token
+        """Return a cached anonymous guest JWT, fetching one when needed.
 
-        cfg = self._config
-        path = f"/institution/{self._institution_code()}/guestJwt"
-        params = {
-            "vid": cfg.vid,
-            "lang": cfg.language,
-            "isGuest": "true",
-            "viewId": self._view_id(),
-        }
-        try:
-            response = await self._http.get(path, params=params)
-            response.raise_for_status()
-        except httpx.HTTPError as e:
-            raise PrimoAPIError(
-                f"Could not obtain a Primo guest token from {path}. "
-                "Direct record lookup is unavailable; falling back to "
-                f"search-based lookup. ({e})",
-            ) from e
+        Serialised with a lock so concurrent record lookups share one fetch
+        instead of racing for identical tokens.
+        """
+        async with self._guest_jwt_lock:
+            now = time.monotonic()
+            if (
+                not force_refresh
+                and self._guest_jwt_token
+                and now < self._guest_jwt_expiry
+            ):
+                return self._guest_jwt_token
 
-        token = response.text.strip().strip('"')
-        if not token:
-            raise PrimoAPIError("Primo guest token endpoint returned an empty token.")
+            cfg = self._config
+            path = f"/institution/{self._institution_code()}/guestJwt"
+            params = {
+                "vid": cfg.vid,
+                "lang": cfg.language,
+                "isGuest": "true",
+                "viewId": self._view_id(),
+            }
+            try:
+                response = await self._http.get(path, params=params)
+                response.raise_for_status()
+            except httpx.HTTPError as e:
+                raise PrimoAPIError(
+                    f"Could not obtain a Primo guest token from {path}. "
+                    "Direct record lookup is unavailable; falling back to "
+                    f"search-based lookup. ({e})",
+                ) from e
 
-        exp = self._jwt_expiry_epoch(token)
-        if exp is not None:
-            lifetime = max(exp - time.time() - self._JWT_SAFETY_MARGIN_SECONDS, 60.0)
-        else:
-            lifetime = self._JWT_FALLBACK_LIFETIME_SECONDS
-        self._guest_jwt_token = token
-        self._guest_jwt_expiry = now + lifetime
-        return token
+            token = response.text.strip().strip('"')
+            if not token:
+                raise PrimoAPIError(
+                    "Primo guest token endpoint returned an empty token."
+                )
+
+            exp = self._jwt_expiry_epoch(token)
+            if exp is not None:
+                lifetime = max(
+                    exp - time.time() - self._JWT_SAFETY_MARGIN_SECONDS, 60.0
+                )
+            else:
+                lifetime = self._JWT_FALLBACK_LIFETIME_SECONDS
+            self._guest_jwt_token = token
+            self._guest_jwt_expiry = now + lifetime
+            return token
 
     async def search(
         self,
@@ -430,14 +441,29 @@ class PrimoClient:
         docs = response.get("docs", [])
         return [doc.get("text", "") for doc in docs if doc.get("text")]
 
+    _GET_RECORDS_CONCURRENCY = 4
+
     async def get_records(self, record_ids: list[str]) -> list[PrimoRecord]:
-        """Fetch multiple records by their IDs."""
-        records = []
-        for rid in record_ids:
-            record = await self.get_record(rid)
-            if record:
-                records.append(record)
-        return records
+        """Fetch multiple records by their IDs, preserving input order.
+
+        Lookups run concurrently under a small bound (each get_record can
+        fan out into a token fetch plus several fallback searches). IDs that
+        resolve to no record are dropped. The first lookup error is raised
+        only after every lookup has settled, so no request is left running.
+        """
+        semaphore = asyncio.Semaphore(self._GET_RECORDS_CONCURRENCY)
+
+        async def fetch(rid: str) -> PrimoRecord | None:
+            async with semaphore:
+                return await self.get_record(rid)
+
+        results = await asyncio.gather(
+            *(fetch(rid) for rid in record_ids), return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        return [record for record in results if record is not None]
 
     async def _get(self, path: str, params: dict[str, Any]) -> dict:
         """Make a GET request to the Primo API."""

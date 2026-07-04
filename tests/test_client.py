@@ -625,3 +625,119 @@ class TestSearchFacets:
         assert response.facets == []
 
 
+def _search_doc(record_id: str) -> dict:
+    return {
+        "pnx": {
+            "control": {"recordid": [record_id]},
+            "display": {"title": [f"Title {record_id}"]},
+        }
+    }
+
+
+class TestGetRecords:
+    def _http_client(self, handler) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url="https://example.test/primaws/rest/pub",
+            transport=httpx.MockTransport(handler),
+        )
+
+    async def test_preserves_input_order_and_drops_missing_ids(self):
+        import asyncio
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if "guestJwt" in request.url.path or "/pnxs/" in request.url.path:
+                return httpx.Response(404)
+            rid = request.url.params["q"].rsplit(",", 1)[-1]
+            if rid == "cdi_slow":
+                # The slowest lookup is the FIRST id; order must still hold.
+                await asyncio.sleep(0.05)
+                return httpx.Response(
+                    200, json={"info": {"total": 1}, "docs": [_search_doc(rid)]}
+                )
+            if rid == "cdi_fast":
+                return httpx.Response(
+                    200, json={"info": {"total": 1}, "docs": [_search_doc(rid)]}
+                )
+            return _empty_response()
+
+        async with self._http_client(handler) as http_client:
+            client = PrimoClient(http_client, _config())
+            records = await client.get_records(
+                ["cdi_slow", "cdi_missing", "cdi_fast"]
+            )
+
+        assert [r.record_id for r in records] == ["cdi_slow", "cdi_fast"]
+
+    async def test_lookups_overlap_instead_of_running_sequentially(self):
+        import asyncio
+
+        inflight = 0
+        max_inflight = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal inflight, max_inflight
+            if "guestJwt" in request.url.path or "/pnxs/" in request.url.path:
+                return httpx.Response(404)
+            inflight += 1
+            max_inflight = max(max_inflight, inflight)
+            await asyncio.sleep(0.02)
+            inflight -= 1
+            rid = request.url.params["q"].rsplit(",", 1)[-1]
+            return httpx.Response(
+                200, json={"info": {"total": 1}, "docs": [_search_doc(rid)]}
+            )
+
+        async with self._http_client(handler) as http_client:
+            client = PrimoClient(http_client, _config())
+            records = await client.get_records(["cdi_a", "cdi_b", "cdi_c"])
+
+        assert len(records) == 3
+        assert max_inflight > 1
+
+    async def test_propagates_lookup_errors_after_all_settle(self):
+        async def handler(request: httpx.Request) -> httpx.Response:
+            if "guestJwt" in request.url.path or "/pnxs/" in request.url.path:
+                return httpx.Response(404)
+            rid = request.url.params["q"].rsplit(",", 1)[-1]
+            if rid == "cdi_bad":
+                return httpx.Response(500)
+            return httpx.Response(
+                200, json={"info": {"total": 1}, "docs": [_search_doc(rid)]}
+            )
+
+        async with self._http_client(handler) as http_client:
+            client = PrimoClient(http_client, _config())
+            with pytest.raises(PrimoAPIError):
+                await client.get_records(["cdi_good", "cdi_bad"])
+
+    async def test_concurrent_lookups_share_one_guest_jwt_fetch(self):
+        token = _fake_jwt()
+        jwt_calls = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal jwt_calls
+            if "guestJwt" in request.url.path:
+                jwt_calls += 1
+                return httpx.Response(200, json=token)
+            if "/pnxs/" in request.url.path:
+                rid = request.url.path.rsplit("/", 1)[-1]
+                return httpx.Response(
+                    200,
+                    json={
+                        "context": "PC",
+                        "pnx": {
+                            "control": {"recordid": [rid]},
+                            "display": {"title": [f"Title {rid}"]},
+                        },
+                    },
+                )
+            raise AssertionError(f"unexpected request: {request.url}")
+
+        async with self._http_client(handler) as http_client:
+            client = PrimoClient(http_client, _config())
+            records = await client.get_records(["cdi_a", "cdi_b", "cdi_c"])
+
+        assert [r.record_id for r in records] == ["cdi_a", "cdi_b", "cdi_c"]
+        assert jwt_calls == 1
+
+
