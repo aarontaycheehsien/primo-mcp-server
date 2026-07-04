@@ -486,7 +486,6 @@ class PrimoClient:
         try:
             response = await self._http.get(path, params=params)
             response.raise_for_status()
-            return response.json()
         except httpx.TimeoutException as e:
             raise PrimoAPIError(
                 f"Request timed out after {self._config.request_timeout}s. "
@@ -518,4 +517,27 @@ class PrimoClient:
         except Exception as e:
             raise PrimoAPIError(
                 f"Unexpected error querying Primo: {e}",
+            ) from e
+
+        # Primo serves outage/maintenance pages (and CDN challenge pages)
+        # as HTTP 200 with an HTML body, so a JSON parse failure here means
+        # the service is effectively down rather than the query being bad.
+        try:
+            return response.json()
+        except ValueError as e:
+            body = response.text
+            if "maintenance" in body.lower() or "EXL_" in body:
+                raise PrimoAPIError(
+                    "The Primo discovery service is down for maintenance "
+                    "(the API returned its maintenance page instead of "
+                    "results). This is a library-side outage, not a query "
+                    "problem. Try again later.",
+                    status_code=503,
+                ) from e
+            content_type = response.headers.get("content-type", "unknown")
+            raise PrimoAPIError(
+                "Primo returned a non-JSON response "
+                f"(content type: {content_type}). The service may be down "
+                "or behind an access barrier. Try again later.",
+                status_code=502,
             ) from e

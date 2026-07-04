@@ -92,6 +92,46 @@ class TestSearchRequestScopes:
         assert requests == []
 
 
+class TestNonJsonResponses:
+    _MAINTENANCE_HTML = (
+        "<!DOCTYPE html>\n<html>\n"
+        "   <!--Do not remove or edit this comment. EXL_green -->\n"
+        '<body><div align="center" class="container">'
+        '<img src="/maintenance.jpg"></div></body></html>'
+    )
+
+    async def _search_against(self, response: httpx.Response) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return response
+
+        async with httpx.AsyncClient(
+            base_url="https://example.test/primaws/rest/pub",
+            transport=httpx.MockTransport(handler),
+        ) as http_client:
+            client = PrimoClient(http_client, _config())
+            await client.search("covidence")
+
+    async def test_maintenance_page_raises_clear_outage_error(self):
+        response = httpx.Response(
+            200,
+            text=self._MAINTENANCE_HTML,
+            headers={"content-type": "text/html; charset=UTF-8"},
+        )
+        with pytest.raises(PrimoAPIError, match="down for maintenance") as exc_info:
+            await self._search_against(response)
+        assert exc_info.value.status_code == 503
+
+    async def test_other_non_json_body_raises_clear_error(self):
+        response = httpx.Response(
+            200,
+            text="<html><body>Access denied</body></html>",
+            headers={"content-type": "text/html; charset=UTF-8"},
+        )
+        with pytest.raises(PrimoAPIError, match="non-JSON response") as exc_info:
+            await self._search_against(response)
+        assert exc_info.value.status_code == 502
+
+
 class TestSearchRequestFilters:
     async def test_search_normalises_field_sort_and_resource_type_aliases(self):
         requests: list[httpx.Request] = []
