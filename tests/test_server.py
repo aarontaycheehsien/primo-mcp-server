@@ -484,3 +484,24 @@ async def test_primo_search_forwards_compound_clauses_to_client():
 
     assert client.search_calls[0]["clauses"] == clauses
     assert "Unexpected error" not in output
+
+
+async def test_primo_search_no_match_shows_closest_profiles_with_evidence(tmp_path):
+    output = await primo_search(
+        _fake_context(
+            config_overrides={
+                "librarians_file": _write_librarians_file(tmp_path),
+                # Unreachable threshold forces no_match while keeping the
+                # scored candidates as evidence-bearing near-misses.
+                "librarian_min_score": 10_000.0,
+            }
+        ),
+        "executive compensation",
+        scope="catalogue",
+    )
+
+    assert "Status: no_match" in output
+    assert "Closest configured profiles" in output
+    assert "Evidence: matched terms:" in output
+    assert "(below the confidence threshold)" in output
+    assert "closest configured contact" in output

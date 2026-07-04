@@ -1186,3 +1186,48 @@ def test_format_librarian_directory_caps_listed_subjects():
     assert "subject 11" in output
     assert "subject 12" not in output
     assert "(+3 more)" in output
+
+
+class TestNearMisses:
+    def test_rank_librarians_keeps_below_threshold_candidates(self):
+        from primo_mcp_server.librarians import rank_librarians
+
+        directory = _directory()
+        candidates = rank_librarians(directory, "audit fees dataset")
+
+        assert candidates, "expected at least one scored candidate"
+        assert candidates[0].librarian.id == "accounting"
+        assert candidates[0].matched_terms
+        # The same query filtered at an unreachable threshold returns
+        # nothing -- the candidates themselves survive in rank_librarians.
+        assert (
+            recommend_librarians(directory, "audit fees dataset", min_score=10_000.0)
+            == []
+        )
+
+    def test_no_match_output_shows_near_misses_with_evidence(self):
+        directory = _directory()
+        from primo_mcp_server.librarians import rank_librarians
+
+        near_misses = rank_librarians(directory, "audit fees dataset")[:2]
+        output = format_librarian_recommendations(
+            [],
+            "audit fees dataset",
+            near_misses=near_misses,
+        )
+
+        assert "Status: no_match" in output
+        assert "Closest configured profiles" in output
+        assert "NOT validated recommendations" in output
+        assert "Evidence: matched terms:" in output
+        assert "(below the confidence threshold)" in output
+        assert "always include the evidence shown above" in output
+        assert "[Accounting Librarian](https://library.example.edu/accounting)" in output
+
+    def test_no_match_output_without_near_misses_points_to_directory(self):
+        output = format_librarian_recommendations([], "xyzzy")
+
+        assert "Status: no_match" in output
+        assert "Closest configured profiles" not in output
+        assert "primo_list_librarians" in output
+        assert "never present a librarian as recommended without showing evidence" in output

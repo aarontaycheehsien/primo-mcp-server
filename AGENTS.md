@@ -112,6 +112,14 @@ with an optional Gemini embedding fallback when keyword matches are weak
 or absent. Identifier-shaped queries (DOI, ISBN, ISSN, record IDs) skip
 recommendations entirely. Recommendation counts are capped at 3.
 
+Evidence must always accompany any librarian shown to the user. Validated
+matches carry matched terms and evidence fields (or cosine similarity for
+semantic matches). A `no_match` outcome lists the closest below-threshold
+profiles with their evidence, labelled as not validated; present those only
+as "closest configured contact", never as a recommendation. When nothing
+matched even weakly, route through `primo_list_librarians` and present the
+result as directory information without inventing evidence.
+
 When tuning matching weights or thresholds, run the golden-query benchmark
 before and after and report the delta:
 

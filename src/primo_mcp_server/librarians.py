@@ -7,7 +7,7 @@ import logging
 import math
 import re
 from pathlib import Path
-from typing import Iterable, NamedTuple
+from typing import Iterable, NamedTuple, Sequence
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -655,16 +655,20 @@ def is_excluded(librarian: LibrarianProfile, query: str) -> bool:
     return any(_contains_term(query, term) for term in librarian.excludes)
 
 
-def recommend_librarians(
+def rank_librarians(
     directory: LibrarianDirectory,
     query: str,
     records: list[PrimoRecord] | None = None,
     *,
-    limit: int = 2,
-    min_score: float = 5.0,
     specificity: dict[str, float] | None = None,
 ) -> list[LibrarianMatch]:
-    """Rank configured librarians against a query and Primo record metadata.
+    """Score every configured librarian, best first, with no threshold.
+
+    Candidates must still clear the quality gates (curator deny list,
+    generic metadata-only suppression, the strong-metadata requirement).
+    The confidence threshold is applied by callers, so below-threshold
+    near-misses stay inspectable: a no_match outcome can then show its
+    closest candidates with real evidence instead of discarding them.
 
     ``specificity`` lets callers reuse a precomputed IDF weight map (see
     ``load_librarian_directory_cached``) instead of paying the O(librarians x
@@ -774,7 +778,7 @@ def recommend_librarians(
         ) or not _is_strong_metadata_match(matched_terms, evidence_fields, records):
             continue
 
-        if score >= min_score:
+        if score > 0:
             matches.append(
                 LibrarianMatch(
                     librarian=librarian,
@@ -785,8 +789,26 @@ def recommend_librarians(
             )
 
     matches.sort(key=lambda match: (-match.score, match.librarian.name.casefold()))
+    return matches
+
+
+def recommend_librarians(
+    directory: LibrarianDirectory,
+    query: str,
+    records: list[PrimoRecord] | None = None,
+    *,
+    limit: int = 2,
+    min_score: float = 5.0,
+    specificity: dict[str, float] | None = None,
+) -> list[LibrarianMatch]:
+    """Rank configured librarians against a query and Primo record metadata.
+
+    Only candidates at or above ``min_score`` are returned; use
+    ``rank_librarians`` to also see below-threshold near-misses.
+    """
+    candidates = rank_librarians(directory, query, records, specificity=specificity)
     capped_limit = min(max(1, limit), _MAX_RECOMMENDATIONS)
-    return matches[:capped_limit]
+    return [match for match in candidates if match.score >= min_score][:capped_limit]
 
 
 # Subjects shown per profile in the directory listing. Real profiles list
@@ -844,6 +866,7 @@ def format_librarian_recommendations(
     semantic_error: str | None = None,
     semantic_skipped: str | None = None,
     skip_reason: str | None = None,
+    near_misses: Sequence[LibrarianMatch] = (),
 ) -> str:
     """Format librarian recommendations for MCP responses.
 
@@ -854,6 +877,11 @@ def format_librarian_recommendations(
     ``semantic_skipped`` explains a deliberate skip (e.g. query too short);
     ``skip_reason`` reports why recommendation was skipped entirely (e.g.
     identifier query).
+
+    ``near_misses`` (shown only on no_match) are the closest candidates
+    that scored below the confidence threshold. They are rendered WITH
+    their evidence so that any librarian a caller still chooses to mention
+    always carries evidence -- never presented as a validated match.
     """
     if configuration_message:
         return (
@@ -893,6 +921,32 @@ def format_librarian_recommendations(
         ]
         if error_note:
             lines.append(error_note)
+        if near_misses:
+            lines.append(
+                "Closest configured profiles (scored below the confidence "
+                "threshold; NOT validated recommendations):"
+            )
+            for i, match in enumerate(near_misses, start=1):
+                librarian = match.librarian
+                lines.append(f"{i}. Name: {_format_linked_name(librarian)}")
+                lines.append(f"   Title: {librarian.title or _UNCONFIGURED}")
+                lines.append(f"   Contact: {librarian.email or _UNCONFIGURED}")
+                lines.append(
+                    f"   Evidence: {_format_match_evidence(match)} "
+                    "(below the confidence threshold)"
+                )
+            lines.append(
+                "If you still refer the user to one of these, present them "
+                "as the closest configured contact rather than a validated "
+                "recommendation, and always include the evidence shown above."
+            )
+        else:
+            lines.append(
+                "No configured profile matched even weakly. If the user "
+                "still wants a contact, use primo_list_librarians and "
+                "present the result as directory information; never present "
+                "a librarian as recommended without showing evidence."
+            )
         return "\n".join(lines)
 
     status = (

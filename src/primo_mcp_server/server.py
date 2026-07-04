@@ -107,6 +107,7 @@ async def _format_recommendations_for_records(
         query,
         semantic_error=outcome.semantic_error,
         semantic_skipped=outcome.semantic_skipped,
+        near_misses=outcome.near_misses,
     )
 
 

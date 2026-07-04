@@ -16,9 +16,14 @@ from primo_mcp_server.librarians import (
     _MAX_RECOMMENDATIONS,
     LibrarianDirectory,
     LibrarianMatch,
-    recommend_librarians,
+    rank_librarians,
 )
 from primo_mcp_server.models import PrimoRecord
+
+# How many below-threshold candidates a no_match outcome carries. Enough to
+# offer the closest contact (plus one alternative) with real evidence, few
+# enough that a no_match cannot be mistaken for a recommendation list.
+_MAX_NEAR_MISSES = 2
 
 
 class RecommendationOutcome(NamedTuple):
@@ -27,6 +32,11 @@ class RecommendationOutcome(NamedTuple):
     matches: list[LibrarianMatch]
     semantic_error: str | None = None
     semantic_skipped: str | None = None
+    # Top-scoring candidates below the confidence threshold, populated only
+    # when matches is empty. They exist so a caller who still routes the
+    # user to a librarian always has real evidence to show; they are never
+    # validated recommendations.
+    near_misses: tuple[LibrarianMatch, ...] = ()
 
 
 async def recommend_with_fallback(
@@ -52,14 +62,18 @@ async def recommend_with_fallback(
     Identifier-shaped queries are the caller's concern: skipping them (and
     explaining the skip) happens before this pipeline runs.
     """
-    matches = recommend_librarians(
+    candidates = rank_librarians(
         directory,
         query,
         records or [],
-        limit=limit,
-        min_score=config.librarian_min_score,
         specificity=specificity,
     )
+    capped_limit = min(max(1, limit), _MAX_RECOMMENDATIONS)
+    matches = [
+        candidate
+        for candidate in candidates
+        if candidate.score >= config.librarian_min_score
+    ][:capped_limit]
     semantic_error: str | None = None
     semantic_skipped: str | None = None
     best_keyword_score = matches[0].score if matches else 0.0
@@ -85,5 +99,14 @@ async def recommend_with_fallback(
                 for match in semantic.matches
                 if match.librarian.id not in keyword_ids
             ]
-        )[: min(max(1, limit), _MAX_RECOMMENDATIONS)]
-    return RecommendationOutcome(matches, semantic_error, semantic_skipped)
+        )[:capped_limit]
+
+    # When nothing cleared the threshold on either path, keep the closest
+    # keyword candidates (with their matched-term evidence) so the no_match
+    # output can show why the best candidates were not good enough.
+    near_misses: tuple[LibrarianMatch, ...] = ()
+    if not matches:
+        near_misses = tuple(candidates[:_MAX_NEAR_MISSES])
+    return RecommendationOutcome(
+        matches, semantic_error, semantic_skipped, near_misses
+    )

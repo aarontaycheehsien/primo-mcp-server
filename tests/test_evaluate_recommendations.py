@@ -162,3 +162,46 @@ def test_load_eval_set_rejects_bad_input(tmp_path):
     invalid.write_text('{"cases": [{"expect": []}]}', encoding="utf-8")
     loaded, error = _load_eval_set(str(invalid))
     assert loaded is None and error is not None and "Invalid eval case" in error
+
+
+async def test_recommend_with_fallback_populates_near_misses_only_on_no_match():
+    from primo_mcp_server.config import PrimoConfig
+    from primo_mcp_server.librarians import LibrarianDirectory
+    from primo_mcp_server.recommendation import recommend_with_fallback
+
+    directory = LibrarianDirectory.model_validate(
+        {
+            "librarians": [
+                {
+                    "id": "accounting",
+                    "name": "Accounting Librarian",
+                    "subjects": ["accounting", "audit fees"],
+                    "best_for": ["accounting datasets"],
+                }
+            ]
+        }
+    )
+
+    # An unreachable threshold forces no_match; the scored candidate must
+    # survive as a near-miss with its evidence intact.
+    config = PrimoConfig(
+        librarian_min_score=10_000.0,
+        librarian_semantic_fallback=False,
+        _env_file=None,
+    )
+    outcome = await recommend_with_fallback(directory, "audit fees dataset", [], config)
+    assert outcome.matches == []
+    assert outcome.near_misses
+    assert outcome.near_misses[0].librarian.id == "accounting"
+    assert outcome.near_misses[0].matched_terms
+
+    # With the normal threshold the same query matches, and near-misses
+    # stay empty so they can never shadow a validated recommendation.
+    config = PrimoConfig(
+        librarian_min_score=5.0,
+        librarian_semantic_fallback=False,
+        _env_file=None,
+    )
+    outcome = await recommend_with_fallback(directory, "audit fees dataset", [], config)
+    assert outcome.matches
+    assert outcome.near_misses == ()

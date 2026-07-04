@@ -260,10 +260,15 @@ The `Name` value is always emitted as a Markdown link. The profile `url` is
 used first; if it is missing, the formatter falls back to a `mailto:` link
 when an email address is configured.
 
-When no recommendation clears the confidence threshold, `primo_list_librarians`
+When no recommendation clears the confidence threshold, the `no_match`
+output still shows the closest below-threshold profiles WITH their matching
+evidence, explicitly labelled as not validated -- so any librarian a caller
+passes on to the user always carries evidence, and a weak candidate can
+never be silently presented as a confident match. When nothing matched even
+weakly, the output directs callers to `primo_list_librarians`, which
 returns the complete configured directory (name, title, contact, schools,
-best-for areas, and a sample of subjects) so a caller can still route the user
-to a real contact without inventing one.
+best-for areas, and a sample of subjects) so a caller can still route the
+user to a real contact without inventing one.
 
 Librarian recommendations require an external JSON file. No real profiles are
 bundled. The minimum shape is:
