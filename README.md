@@ -18,6 +18,7 @@ and Unicode-safe handling for Chinese records.
 - Reject invalid search scopes instead of silently falling back to Everything
 - Recommend configured SMU librarians from search queries and Primo metadata
 - Append a "Result landscape" facet summary (resource types, top subjects, creators, journals, languages, availability, publication years) so zero-result and too-many-result searches can be refined from data instead of guesswork
+- Compound boolean queries: multi-clause AND/OR/NOT with contains/exact/begins_with operators for known-item lookups (title AND creator), exact-title checks, and OR expansion
 
 ## Quick Start for SMU
 
@@ -83,6 +84,30 @@ Recommended caller policy:
 - For any zero-result search, reason about why the query failed and try revised `primo_search` calls up to five total attempts. Good retries may broaden an over-specific phrase, use synonyms or related concepts, try singular/plural variants, switch fields, relax filters, widen scope when permitted, search directly for likely database names, or use OR queries for close alternatives.
 - When summarising an iterative search, combine all relevant results found across attempts and report the attempted queries.
 - For access or subscription checks, use Primo results as the evidence source rather than websites or LibGuides.
+
+## Compound Queries
+
+`primo_search` accepts an optional `clauses` list that compiles to Primo's
+multi-clause boolean syntax and replaces the single `query`/`field` pair as
+the retrieval query (`query` should still carry a short plain-text summary;
+it drives librarian recommendations and display). Each clause has a `value`,
+optional `field` (`any`, `title`, `creator`, `sub`, `isbn`, `issn`,
+`oclcnum`), optional `operator` (`contains`, `exact`, `begins_with`), and
+optional `connector` (`AND`, `OR`, `NOT`) joining it to the next clause:
+
+```json
+{
+  "query": "piketty capital",
+  "clauses": [
+    {"field": "title", "value": "capital", "connector": "AND"},
+    {"field": "creator", "value": "piketty"}
+  ]
+}
+```
+
+Use compound queries for known-item lookups (title AND creator), exact-title
+subscription checks, genuine OR expansion across synonyms, or NOT exclusion.
+The result header links to the equivalent Primo advanced search.
 
 ## SMU Configuration
 

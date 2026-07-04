@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+from pydantic import BaseModel
 
 
 _SCOPE_ALIASES = {
@@ -67,7 +71,27 @@ _RESOURCE_TYPE_ALIASES = {
     "conference proceedings": "conference_proceedings",
 }
 
+_OPERATOR_ALIASES = {
+    "contains": "contains",
+    "exact": "exact",
+    "equals": "exact",
+    "is": "exact",
+    "begins_with": "begins_with",
+    "beginswith": "begins_with",
+    "starts_with": "begins_with",
+    "startswith": "begins_with",
+}
+
+_CONNECTOR_ALIASES = {
+    "and": "AND",
+    "or": "OR",
+    "not": "NOT",
+}
+
 _YEAR_RE = re.compile(r"^\d{4}$")
+# Commas and semicolons are Primo's clause syntax separators; they cannot
+# appear inside a clause value.
+_CLAUSE_SEPARATOR_CHARS_RE = re.compile(r"[,;]+")
 
 
 def _key(value: str | None) -> str:
@@ -108,6 +132,78 @@ def normalise_resource_type(resource_type: str | None) -> str | None:
     if resource_type is None:
         return None
     return _normalise_alias(resource_type, _RESOURCE_TYPE_ALIASES, "resource_type")
+
+
+def normalise_operator(operator: str) -> str:
+    """Resolve caller-friendly operator aliases to Primo query operators."""
+    return _normalise_alias(operator, _OPERATOR_ALIASES, "operator")
+
+
+def normalise_connector(connector: str) -> str:
+    """Resolve boolean connector aliases to Primo's AND/OR/NOT."""
+    return _normalise_alias(connector, _CONNECTOR_ALIASES, "connector")
+
+
+class QueryClause(BaseModel):
+    """One clause of a compound Primo query.
+
+    ``connector`` joins this clause to the NEXT one and is ignored on the
+    final clause.
+    """
+
+    value: str
+    field: str = "any"
+    operator: str = "contains"
+    connector: str = "AND"
+
+
+def _clause_fields(clause: Any, position: int) -> dict:
+    if isinstance(clause, QueryClause):
+        return clause.model_dump()
+    if isinstance(clause, Mapping):
+        return dict(clause)
+    raise ValueError(
+        f"Clause {position} must be an object with a value and optional "
+        "field, operator, and connector."
+    )
+
+
+def query_clause_parts(clauses: Sequence[Any]) -> list[str]:
+    """Compile structured clauses into Primo clause strings.
+
+    Each part is ``field,operator,value`` with the boolean connector to the
+    next clause appended (``field,operator,value,AND``) on every clause but
+    the last -- the shape shared by the Primo API ``q`` parameter (parts
+    joined with ``;``) and the Primo UI advanced-search ``query`` parameters
+    (one part each).
+
+    Raises ValueError for empty clause lists, empty values, or unknown
+    field/operator/connector names.
+    """
+    if not clauses:
+        raise ValueError("clauses must contain at least one clause.")
+
+    parts: list[str] = []
+    last = len(clauses) - 1
+    for i, raw in enumerate(clauses):
+        clause = _clause_fields(raw, i + 1)
+        # Separator characters would splice into Primo's clause syntax.
+        value = _CLAUSE_SEPARATOR_CHARS_RE.sub(" ", str(clause.get("value") or ""))
+        value = " ".join(value.split())
+        if not value:
+            raise ValueError(f"Clause {i + 1} has an empty value.")
+        field = normalise_search_field(str(clause.get("field") or "any"))
+        operator = normalise_operator(str(clause.get("operator") or "contains"))
+        part = f"{field},{operator},{value}"
+        if i != last:
+            part += f",{normalise_connector(str(clause.get('connector') or 'AND'))}"
+        parts.append(part)
+    return parts
+
+
+def compile_query_clauses(clauses: Sequence[Any]) -> str:
+    """Compile structured clauses into the Primo API multi-clause ``q``."""
+    return ";".join(query_clause_parts(clauses))
 
 
 def normalise_year(value: str | None, label: str) -> str | None:

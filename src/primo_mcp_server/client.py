@@ -14,6 +14,8 @@ import httpx
 from primo_mcp_server.config import PrimoConfig
 from primo_mcp_server.models import Facet, PrimoRecord, SearchResponse
 from primo_mcp_server.query import (
+    QueryClause,
+    compile_query_clauses,
     date_range_facet_value,
     normalise_resource_type,
     normalise_scope,
@@ -67,6 +69,11 @@ def _normalise_resource_type(resource_type: str | None) -> str | None:
 def _date_range_facet_value(date_from: str | None, date_to: str | None) -> str | None:
     """Return Primo's documented creation-date range facet value."""
     return _normalise_parameter(date_range_facet_value, date_from, date_to)
+
+
+def _compile_query_clauses(clauses: list[QueryClause | dict]) -> str:
+    """Compile compound query clauses into Primo's multi-clause q syntax."""
+    return _normalise_parameter(compile_query_clauses, clauses)
 
 
 class PrimoClient:
@@ -176,6 +183,7 @@ class PrimoClient:
         peer_reviewed: bool | None = None,
         include_unavailable: bool | None = None,
         include_facets: bool | None = None,
+        clauses: list[QueryClause | dict] | None = None,
     ) -> SearchResponse:
         """Search the Primo catalogue.
 
@@ -197,6 +205,9 @@ class PrimoClient:
             include_facets: Also fetch the facet summary for the search.
                 None uses the configured default; facet failures degrade
                 to a response without facets.
+            clauses: Optional compound query clauses. When given they
+                replace the single query/field pair as the retrieval query
+                and are compiled into Primo's multi-clause boolean syntax.
 
         Returns:
             SearchResponse with parsed records, pagination info, and any
@@ -214,6 +225,11 @@ class PrimoClient:
         sort_by = _normalise_sort_by(sort_by)
         resource_type = _normalise_resource_type(resource_type)
         date_range = _date_range_facet_value(date_from, date_to)
+        q_value = (
+            _compile_query_clauses(clauses)
+            if clauses
+            else f"{field},contains,{query}"
+        )
 
         # Resolve scope to tab + scope params
         if canonical_scope == "catalogue":
@@ -230,7 +246,7 @@ class PrimoClient:
             "vid": cfg.vid,
             "tab": tab,
             "scope": scope_param,
-            "q": f"{field},contains,{query}",
+            "q": q_value,
             "offset": str(offset),
             "limit": str(limit),
             "lang": cfg.language,

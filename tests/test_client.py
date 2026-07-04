@@ -741,3 +741,80 @@ class TestGetRecords:
         assert jwt_calls == 1
 
 
+class TestSearchClauses:
+    async def _search(self, handler, **kwargs):
+        async with httpx.AsyncClient(
+            base_url="https://example.test/primaws/rest/pub",
+            transport=httpx.MockTransport(handler),
+        ) as http_client:
+            client = PrimoClient(http_client, _config())
+            return await client.search("summary text", **kwargs)
+
+    async def test_clauses_compile_to_multi_clause_q(self):
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return _empty_response()
+
+        await self._search(
+            handler,
+            clauses=[
+                {"field": "title", "value": "capital", "connector": "AND"},
+                {"field": "creator", "value": "piketty"},
+            ],
+        )
+
+        assert requests[0].url.params["q"] == (
+            "title,contains,capital,AND;creator,contains,piketty"
+        )
+
+    async def test_clause_aliases_and_value_sanitisation(self):
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return _empty_response()
+
+        await self._search(
+            handler,
+            clauses=[
+                {
+                    "field": "author",
+                    "operator": "equals",
+                    "value": "Piketty, Thomas; economist",
+                    "connector": "or",
+                },
+                # Trailing connector on the last clause is ignored.
+                {"value": "wealth", "connector": "NOT"},
+            ],
+        )
+
+        assert requests[0].url.params["q"] == (
+            "creator,exact,Piketty Thomas economist,OR;any,contains,wealth"
+        )
+
+    async def test_invalid_clause_operator_makes_no_request(self):
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return _empty_response()
+
+        with pytest.raises(PrimoAPIError, match="Invalid operator"):
+            await self._search(
+                handler,
+                clauses=[{"value": "capital", "operator": "fuzzy"}],
+            )
+        assert requests == []
+
+    async def test_empty_clause_value_makes_no_request(self):
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return _empty_response()
+
+        with pytest.raises(PrimoAPIError, match="empty value"):
+            await self._search(handler, clauses=[{"value": " ,; "}])
+        assert requests == []

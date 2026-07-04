@@ -451,3 +451,23 @@ async def test_primo_list_librarians_without_config_returns_guidance():
 
     assert output.startswith("Librarian directory unavailable:")
     assert "PRIMO_LIBRARIANS_FILE" in output
+
+
+async def test_primo_search_forwards_compound_clauses_to_client():
+    from primo_mcp_server.query import QueryClause
+
+    client = _FakeClient()
+    clauses = [
+        QueryClause(field="title", value="capital", connector="AND"),
+        QueryClause(field="creator", value="piketty"),
+    ]
+
+    output = await primo_search(
+        _fake_context(client=client),
+        "piketty capital",
+        clauses=clauses,
+        recommend_librarians=False,
+    )
+
+    assert client.search_calls[0]["clauses"] == clauses
+    assert "Unexpected error" not in output

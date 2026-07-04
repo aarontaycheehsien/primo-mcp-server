@@ -21,6 +21,7 @@ from primo_mcp_server.librarians import (
     load_librarian_directory_cached,
     looks_like_identifier,
 )
+from primo_mcp_server.query import QueryClause
 from primo_mcp_server.recommendation import recommend_with_fallback
 
 
@@ -163,6 +164,7 @@ async def primo_search(
     include_unavailable: bool | None = None,
     recommend_librarians: bool = True,
     librarian_limit: int = 2,
+    clauses: list[QueryClause] | None = None,
 ) -> str:
     """Search Singapore Management University Library via Primo.
 
@@ -235,6 +237,7 @@ async def primo_search(
             date_to=date_to,
             peer_reviewed=peer_reviewed,
             include_unavailable=include_unavailable,
+            clauses=clauses,
         )
         result = format_search_results(
             response,
@@ -249,6 +252,7 @@ async def primo_search(
             date_to=date_to,
             peer_reviewed=peer_reviewed,
             include_unavailable=include_unavailable,
+            clauses=clauses,
         )
         if (
             recommend_librarians

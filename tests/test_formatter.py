@@ -464,3 +464,43 @@ class TestResultLandscape:
         assert "Result landscape" not in output
 
 
+class TestCompoundQueryLinks:
+    def _clauses(self):
+        return [
+            {"field": "title", "value": "capital", "connector": "AND"},
+            {"field": "creator", "value": "piketty"},
+        ]
+
+    def test_build_search_url_uses_advanced_mode_with_one_param_per_clause(self):
+        url = build_search_url("summary", _smu_config(), clauses=self._clauses())
+        assert url is not None
+        params = parse_qs(urlparse(url).query)
+        assert params["query"] == [
+            "title,contains,capital,AND",
+            "creator,contains,piketty",
+        ]
+        assert params["mode"] == ["advanced"]
+
+    def test_build_search_url_returns_none_for_invalid_clauses(self):
+        url = build_search_url(
+            "summary",
+            _smu_config(),
+            clauses=[{"value": "x", "operator": "fuzzy"}],
+        )
+        assert url is None
+
+    def test_search_results_label_shows_compiled_clauses(self, search_results_data):
+        response = SearchResponse.from_api_response(search_results_data)
+        output = format_search_results(
+            response,
+            "piketty capital",
+            config=_smu_config(),
+            clauses=self._clauses(),
+        )
+        assert (
+            "- Results found: [title,contains,capital,AND;creator,contains,piketty]("
+            in output
+        )
+        assert "mode=advanced" in output
+
+
