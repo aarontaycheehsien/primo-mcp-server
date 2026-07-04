@@ -354,11 +354,57 @@ class SearchInfo(BaseModel):
     last: int = 0
 
 
+class FacetValue(BaseModel):
+    """A single facet value with its result count."""
+
+    value: str = ""
+    count: int = 0
+
+
+class Facet(BaseModel):
+    """One search facet (e.g. rtype, topic) summarising all matching results."""
+
+    name: str = ""
+    values: list[FacetValue] = Field(default_factory=list)
+
+    @classmethod
+    def list_from_api_response(cls, data: dict) -> list[Facet]:
+        """Parse a Primo /facets response into Facet models.
+
+        Counts arrive as strings ("412"); unparseable counts become 0.
+        Facets without a name or without any named values are dropped.
+        """
+        facets: list[Facet] = []
+        for raw in data.get("facets") or []:
+            if not isinstance(raw, dict):
+                continue
+            name = str(raw.get("name", "")).strip()
+            values: list[FacetValue] = []
+            for raw_value in raw.get("values") or []:
+                if not isinstance(raw_value, dict):
+                    continue
+                value = str(raw_value.get("value", "")).strip()
+                if not value:
+                    continue
+                try:
+                    count = int(str(raw_value.get("count", 0)))
+                except ValueError:
+                    count = 0
+                values.append(FacetValue(value=value, count=count))
+            if name and values:
+                facets.append(cls(name=name, values=values))
+        return facets
+
+
 class SearchResponse(BaseModel):
     """Parsed Primo search response."""
 
     info: SearchInfo = Field(default_factory=SearchInfo)
     records: list[PrimoRecord] = Field(default_factory=list)
+    # Facets summarising ALL matching results (not just the returned page).
+    # Populated from Primo's separate /facets endpoint after the search;
+    # empty when facets are unavailable (e.g. local catalogue scope).
+    facets: list[Facet] = Field(default_factory=list)
 
     @property
     def total_results(self) -> int:

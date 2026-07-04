@@ -11,7 +11,7 @@ from urllib.parse import quote
 import httpx
 
 from primo_mcp_server.config import PrimoConfig
-from primo_mcp_server.models import PrimoRecord, SearchResponse
+from primo_mcp_server.models import Facet, PrimoRecord, SearchResponse
 from primo_mcp_server.query import (
     date_range_facet_value,
     normalise_resource_type,
@@ -164,6 +164,7 @@ class PrimoClient:
         date_to: str | None = None,
         peer_reviewed: bool | None = None,
         include_unavailable: bool | None = None,
+        include_facets: bool | None = None,
     ) -> SearchResponse:
         """Search the Primo catalogue.
 
@@ -182,9 +183,13 @@ class PrimoClient:
             include_unavailable: Include CDI records the institution has no
                 full text access to (Primo's pcAvailability "expanded"
                 search). None uses the configured default.
+            include_facets: Also fetch the facet summary for the search.
+                None uses the configured default; facet failures degrade
+                to a response without facets.
 
         Returns:
-            SearchResponse with parsed records and pagination info.
+            SearchResponse with parsed records, pagination info, and any
+            available facets.
         """
         cfg = self._config
         limit = min(max(1, limit), cfg.max_results_per_request)
@@ -236,7 +241,30 @@ class PrimoClient:
             params["qInclude"] = "|,|".join(q_include)
 
         data = await self._get("/pnxs", params=params)
-        return SearchResponse.from_api_response(data)
+        response = SearchResponse.from_api_response(data)
+
+        if include_facets is None:
+            include_facets = cfg.search_facets
+        if include_facets and response.records:
+            response.facets = await self._fetch_facets(params)
+        return response
+
+    async def _fetch_facets(self, params: dict[str, Any]) -> list[Facet]:
+        """Fetch the facet summary for the search just executed.
+
+        Primo's /facets endpoint returns facets for the search the current
+        cookie session already ran, so it must be called with the same
+        parameters straight after the /pnxs request (the shared httpx client
+        carries the session cookie). Facets are auxiliary context: any
+        failure degrades to no facets rather than failing the search, and
+        scopes Primo serves no facets for (e.g. the local catalogue scope)
+        simply return an empty list.
+        """
+        try:
+            data = await self._get("/facets", params=params)
+        except PrimoAPIError:
+            return []
+        return Facet.list_from_api_response(data)
 
     async def get_record(self, record_id: str) -> PrimoRecord | None:
         """Fetch a single record by its Primo record ID.

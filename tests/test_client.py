@@ -518,3 +518,110 @@ class TestPcAvailability:
         config.include_unavailable = True
         params = await self._search_params(config, include_unavailable=None)
         assert params["pcAvailability"] == "true"
+
+
+def _search_payload() -> dict:
+    return {
+        "info": {"total": 1},
+        "docs": [
+            {
+                "pnx": {
+                    "control": {"recordid": ["alma1"]},
+                    "display": {"title": ["A title"]},
+                }
+            }
+        ],
+    }
+
+
+_FACETS_PAYLOAD = {
+    "facets": [
+        {"name": "rtype", "values": [{"value": "articles", "count": "42"}]}
+    ]
+}
+
+
+class TestSearchFacets:
+    async def _run_search(self, handler, **kwargs):
+        async with httpx.AsyncClient(
+            base_url="https://example.test/primaws/rest/pub",
+            transport=httpx.MockTransport(handler),
+        ) as http_client:
+            client = PrimoClient(http_client, _config())
+            return await client.search("Singapore", **kwargs)
+
+    async def test_search_fetches_facets_with_same_query(self):
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            if request.url.path.endswith("/facets"):
+                return httpx.Response(200, json=_FACETS_PAYLOAD)
+            return httpx.Response(200, json=_search_payload())
+
+        response = await self._run_search(handler)
+
+        assert [r.url.path for r in requests] == [
+            "/primaws/rest/pub/pnxs",
+            "/primaws/rest/pub/facets",
+        ]
+        # The /facets endpoint returns facets for the query the session just
+        # ran, so the parameters must match the /pnxs request.
+        assert requests[1].url.params["q"] == requests[0].url.params["q"]
+        assert requests[1].url.params["tab"] == requests[0].url.params["tab"]
+        assert [(f.name, f.values[0].count) for f in response.facets] == [
+            ("rtype", 42)
+        ]
+
+    async def test_facets_failure_degrades_to_no_facets(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/facets"):
+                return httpx.Response(500)
+            return httpx.Response(200, json=_search_payload())
+
+        response = await self._run_search(handler)
+        assert response.records
+        assert response.facets == []
+
+    async def test_no_facets_request_for_empty_results(self):
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return _empty_response()
+
+        response = await self._run_search(handler)
+        assert [r.url.path for r in requests] == ["/primaws/rest/pub/pnxs"]
+        assert response.facets == []
+
+    async def test_include_facets_false_skips_facets_request(self):
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json=_search_payload())
+
+        response = await self._run_search(handler, include_facets=False)
+        assert [r.url.path for r in requests] == ["/primaws/rest/pub/pnxs"]
+        assert response.facets == []
+
+    async def test_config_default_can_disable_facets(self):
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json=_search_payload())
+
+        config = _config()
+        config.search_facets = False
+        async with httpx.AsyncClient(
+            base_url="https://example.test/primaws/rest/pub",
+            transport=httpx.MockTransport(handler),
+        ) as http_client:
+            client = PrimoClient(http_client, config)
+            response = await client.search("Singapore")
+
+        assert [r.url.path for r in requests] == ["/primaws/rest/pub/pnxs"]
+        assert response.facets == []
+
+

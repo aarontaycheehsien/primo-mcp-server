@@ -40,6 +40,12 @@ class PrimoConfig(BaseSettings):
     # "expanded" and includes records with no access. False is the safer
     # default for holdings-confirmation queries.
     include_unavailable: bool = False
+    # Fetch the facet summary (a second, cheap /facets request) after each
+    # search and append a "Result landscape" section to search output so
+    # callers can refine queries from data instead of guessing. Primo only
+    # serves facets for the combined (Everything) scope; other scopes
+    # return none and the section is simply omitted.
+    search_facets: bool = True
 
     # Optional external JSON directory used for librarian recommendations.
     # No real profile data is bundled; local installs opt in by setting this.

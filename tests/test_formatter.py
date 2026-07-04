@@ -12,7 +12,7 @@ from primo_mcp_server.formatter import (
     format_suggestions,
     record_link,
 )
-from primo_mcp_server.models import PrimoRecord, SearchResponse
+from primo_mcp_server.models import Facet, FacetValue, PrimoRecord, SearchResponse
 
 
 def _smu_config(**overrides) -> PrimoConfig:
@@ -401,3 +401,66 @@ class TestRecordContextMatching:
         )
         url = build_record_url(record, _smu_config())
         assert "context=L" in url
+
+
+class TestResultLandscape:
+    def test_landscape_summarises_curated_facets(self, search_results_data):
+        response = SearchResponse.from_api_response(search_results_data)
+        response.facets = [
+            Facet(
+                name="rtype",
+                values=[
+                    FacetValue(value="newspaper_articles", count=7368),
+                    FacetValue(value="articles", count=20530),
+                ],
+            ),
+            Facet(name="topic", values=[FacetValue(value="Ecology", count=6515)]),
+            Facet(
+                name="newrecords",
+                values=[FacetValue(value="30 days back", count=6)],
+            ),
+            Facet(
+                name="creationdate",
+                values=[
+                    FacetValue(value="2024", count=9),
+                    FacetValue(value="1998", count=1),
+                    FacetValue(value="not-a-year", count=2),
+                ],
+            ),
+        ]
+        output = format_search_results(response, "test")
+        assert "Result landscape (facets over all matching results):" in output
+        # Sorted by count and prettified for coded facets.
+        assert "- Resource types: articles (20,530), newspaper articles (7,368)" in output
+        assert "- Top subjects: Ecology (6,515)" in output
+        assert "- Publication years: 1998-2024" in output
+        assert "- Refine with resource_type" in output
+        # Uncurated facets stay hidden.
+        assert "newrecords" not in output
+        assert "30 days back" not in output
+
+    def test_landscape_shows_top_five_values_and_more_marker(self, search_results_data):
+        response = SearchResponse.from_api_response(search_results_data)
+        response.facets = [
+            Facet(
+                name="topic",
+                values=[
+                    FacetValue(value=f"subject {i}", count=100 - i) for i in range(8)
+                ],
+            )
+        ]
+        output = format_search_results(response, "test")
+        line = next(
+            l for l in output.splitlines() if l.startswith("- Top subjects:")
+        )
+        assert "subject 0 (100)" in line
+        assert "subject 4 (96)" in line
+        assert "subject 5" not in line
+        assert "+3 more" in line
+
+    def test_no_landscape_without_facets(self, search_results_data):
+        response = SearchResponse.from_api_response(search_results_data)
+        output = format_search_results(response, "test")
+        assert "Result landscape" not in output
+
+

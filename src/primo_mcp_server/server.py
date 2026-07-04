@@ -405,6 +405,9 @@ async def primo_recommend_librarians(
                 date_to=date_to,
                 peer_reviewed=peer_reviewed,
                 include_unavailable=include_unavailable,
+                # Records are only metadata evidence here; the facet summary
+                # would be an unused second request.
+                include_facets=False,
             )
             records = response.records
 

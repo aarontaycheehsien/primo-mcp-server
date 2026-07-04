@@ -1,6 +1,6 @@
 """Tests for Primo PNX model parsing."""
 
-from primo_mcp_server.models import PrimoRecord, SearchResponse
+from primo_mcp_server.models import Facet, FacetValue, PrimoRecord, SearchResponse
 
 
 class TestSearchResponse:
@@ -348,3 +348,55 @@ class TestDoiAndIdentifierParsing:
             "DOI: 10.1007/978-981-15-1967-3",
         ]
         assert record.doi == "10.1007/978-981-15-1967-3"
+
+
+class TestFacetParsing:
+    def test_parses_facets_with_string_counts(self):
+        data = {
+            "facets": [
+                {
+                    "name": "rtype",
+                    "values": [
+                        {"value": "articles", "count": "412"},
+                        {"value": "books", "count": 7},
+                    ],
+                }
+            ]
+        }
+        facets = Facet.list_from_api_response(data)
+        assert len(facets) == 1
+        assert facets[0].name == "rtype"
+        assert [(v.value, v.count) for v in facets[0].values] == [
+            ("articles", 412),
+            ("books", 7),
+        ]
+
+    def test_drops_nameless_empty_and_malformed_facets(self):
+        data = {
+            "facets": [
+                {"name": "", "values": [{"value": "x", "count": 1}]},
+                {"name": "topic", "values": []},
+                "junk",
+                {
+                    "name": "lang",
+                    "values": [
+                        {"value": "", "count": 3},
+                        "junk",
+                        {"value": "eng", "count": "not-a-number"},
+                    ],
+                },
+            ]
+        }
+        facets = Facet.list_from_api_response(data)
+        assert [f.name for f in facets] == ["lang"]
+        assert [(v.value, v.count) for v in facets[0].values] == [("eng", 0)]
+
+    def test_missing_or_null_facets_key(self):
+        assert Facet.list_from_api_response({}) == []
+        assert Facet.list_from_api_response({"facets": None}) == []
+
+    def test_search_response_defaults_to_no_facets(self, search_results_data):
+        response = SearchResponse.from_api_response(search_results_data)
+        assert response.facets == []
+
+

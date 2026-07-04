@@ -213,6 +213,73 @@ def _format_query_links(
     query_label = _markdown_link_text(f"{field},contains,{query}")
     result_label = "Results found" if has_results else "No results"
     return ["Queries run:", f"- {result_label}: [{query_label}]({search_url})", ""]
+# Facets shown in the "Result landscape" section, in display order. Other
+# facets Primo returns (newrecords, domain, attribute, library) are either
+# coded values or rarely useful for query refinement, so they are omitted.
+_LANDSCAPE_FACETS = (
+    ("rtype", "Resource types"),
+    ("topic", "Top subjects"),
+    ("creator", "Top creators"),
+    ("jtitle", "Top journals"),
+    ("lang", "Languages"),
+    ("tlevel", "Availability"),
+)
+_LANDSCAPE_VALUES_SHOWN = 5
+
+# Availability (tlevel) facet codes that don't read well de-underscored.
+_TLEVEL_LABELS = {
+    "available_p": "available in library (physical)",
+    "online_resources": "online",
+}
+
+
+def _facet_value_label(facet_name: str, value: str) -> str:
+    """Prettify coded facet values; leave free-text values untouched."""
+    if facet_name == "tlevel":
+        return _TLEVEL_LABELS.get(value, value.replace("_", " "))
+    if facet_name == "rtype":
+        return value.replace("_", " ")
+    return value
+
+
+def _format_result_landscape(response: SearchResponse) -> list[str]:
+    """Summarise facets over ALL matching results, not just the shown page.
+
+    This is what lets a caller refine a search from data instead of
+    guessing: the counts reveal whether a filter is starving the results,
+    which subject headings Primo actually uses, and where the material
+    concentrates.
+    """
+    by_name = {facet.name: facet for facet in response.facets}
+    lines: list[str] = []
+    for name, label in _LANDSCAPE_FACETS:
+        facet = by_name.get(name)
+        if facet is None:
+            continue
+        values = sorted(facet.values, key=lambda v: v.count, reverse=True)
+        shown = values[:_LANDSCAPE_VALUES_SHOWN]
+        rendered = ", ".join(
+            f"{_facet_value_label(name, v.value)} ({v.count:,})" for v in shown
+        )
+        more = f", +{len(values) - len(shown)} more" if len(values) > len(shown) else ""
+        lines.append(f"- {label}: {rendered}{more}")
+
+    dates = by_name.get("creationdate")
+    if dates is not None:
+        years = sorted(v.value for v in dates.values if v.value.isdigit())
+        if years:
+            span = years[0] if years[0] == years[-1] else f"{years[0]}-{years[-1]}"
+            lines.append(f"- Publication years: {span}")
+
+    if not lines:
+        return []
+    # The record list already ends with a blank separator line.
+    return [
+        "Result landscape (facets over all matching results):",
+        *lines,
+        "- Refine with resource_type, date_from/date_to, peer_reviewed, "
+        "or a narrower query using a subject term above.",
+    ]
 
 
 def _format_title(record: PrimoRecord, config: PrimoConfig | None = None) -> str:
@@ -350,6 +417,8 @@ def format_search_results(
         lines.append(f"    {' | '.join(status_parts)}")
         lines.append(f"    Record ID: {record.record_id}")
         lines.append("")
+
+    lines.extend(_format_result_landscape(response))
 
     return "\n".join(lines).rstrip()
 
