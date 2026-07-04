@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlencode
 
 from primo_mcp_server.models import PrimoRecord, SearchResponse
+from primo_mcp_server.policy import ZERO_RESULT_GUIDANCE_LINES
 from primo_mcp_server.query import (
     QueryClause,
     date_range_facet_value,
@@ -390,11 +391,7 @@ def format_search_results(
                 "- Remove filters (resource type, date range)",
                 "",
                 "Iterative search guidance:",
-                "- Reason about why this query returned zero results, then call primo_search again with a revised query.",
-                "- Try up to five total attempts before concluding there are no good Primo results.",
-                "- For dataset or data-source requests, start retries with catalogue databases (scope=\"catalogue\", resource_type=\"databases\") before expanding to articles or books.",
-                "- Consider broader concepts, synonyms, related disciplines, singular/plural variants, alternate fields, relaxed filters, permitted scope widening, direct searches for likely database names, or OR queries for close alternatives.",
-                "- When summarising, combine all relevant results found across attempts and report the attempted queries.",
+                *(f"- {line}" for line in ZERO_RESULT_GUIDANCE_LINES),
             ]
         )
         return "\n".join(lines)

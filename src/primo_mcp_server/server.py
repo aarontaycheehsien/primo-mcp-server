@@ -21,6 +21,7 @@ from primo_mcp_server.librarians import (
     load_librarian_directory_cached,
     looks_like_identifier,
 )
+from primo_mcp_server.policy import PRIMO_SEARCH_DESCRIPTION, SERVER_INSTRUCTIONS
 from primo_mcp_server.query import QueryClause
 from primo_mcp_server.recommendation import recommend_with_fallback
 
@@ -40,42 +41,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[dict]:
 
 mcp = FastMCP(
     "primo",
-    instructions=(
-        "Search Singapore Management University Library catalogue records, "
-        "articles, databases, books, videos, and holdings via the Ex Libris "
-        "Primo discovery API. "
-        "Scope selection policy: when asked to search the catalogue, call "
-        "primo_search with scope='catalogue' first; if that returns no "
-        "results and the user did not ask for catalogue-only results, retry "
-        "with scope='everything' and say that you widened the search. "
-        "For books, databases, and videos, default to scope='catalogue'. "
-        "For articles, default to scope='everything'. For dataset or "
-        "data-source requests, start with scope='catalogue' and "
-        "resource_type='databases' to find subscribed data platforms first; "
-        "only expand to articles or books after the database pass is weak, "
-        "irrelevant, or empty, and say that you expanded beyond databases. "
-        "For confirmation "
-        "requests about whether the library has, owns, subscribes to, or "
-        "provides access to a title, use Primo as the evidence source and "
-        "do not use websites, LibGuides, or general web pages unless the "
-        "user explicitly asks for web confirmation. "
-        "Use primo_search for queries, primo_get_record for full details, "
-        "primo_suggest for autocomplete, primo_recommend_librarians for "
-        "validated librarian recommendations, primo_list_librarians for "
-        "the full configured librarian directory, primo_cite for "
-        "citations, and primo_export for BibTeX/RIS/CSV export. Librarian "
-        "recommendations are limited to configured profile IDs; do not "
-        "invent or substitute names. When a primo_search call returns zero "
-        "results, callers should reason about why the query failed and may "
-        "iteratively call primo_search with revised queries up to five total "
-        "attempts. Retry by broadening overly specific phrases, using "
-        "synonyms or related concepts, trying singular/plural variants, "
-        "switching fields where justified, relaxing filters, or widening "
-        "scope according to the scope policy. Callers may also search "
-        "directly for likely database names and use OR queries when that "
-        "helps cover close alternatives. Combine all relevant results found "
-        "across attempts, and report the attempted queries when summarising."
-    ),
+    instructions=SERVER_INSTRUCTIONS,
     lifespan=app_lifespan,
 )
 
@@ -148,7 +114,7 @@ async def _format_recommendations_for_records(
 # Tool 1: primo_search
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(description=PRIMO_SEARCH_DESCRIPTION)
 async def primo_search(
     ctx: Context,
     query: str,
@@ -168,59 +134,9 @@ async def primo_search(
 ) -> str:
     """Search Singapore Management University Library via Primo.
 
-    Scope selection policy for callers:
-    - When asked to search the catalogue, use scope="catalogue" first. If
-      that returns no results and the user did not ask for catalogue-only
-      results, retry with scope="everything" and say that the search was
-      widened.
-    - For books, databases, and videos, default to scope="catalogue".
-    - For articles, default to scope="everything".
-    - For dataset or data-source requests, first search subscribed databases
-      with scope="catalogue" and resource_type="databases". Only after
-      database results are weak, irrelevant, or empty should callers expand
-      to articles or books, and they should state that expansion.
-    - For confirmation requests about whether the library has, owns,
-      subscribes to, or provides access to a title, use Primo as the
-      evidence source. Do not rely on websites, LibGuides, or general web
-      pages unless the user explicitly asks for web confirmation.
-    - When a search returns zero results, the caller should reason about
-      why the query failed and call primo_search again with revised queries
-      up to five total attempts. Try broader concepts, synonyms, related
-      disciplines, singular/plural variants, alternate fields, relaxed
-      filters, scope widening where the scope policy permits, direct
-      searches for likely database names, or OR queries for close
-      alternatives. Combine relevant results from all attempts when
-      summarising.
-
-    Args:
-        query: Search terms (e.g. "machine learning entrepreneurship").
-        field: Search field -- "any" (default), "title", "creator", "sub" (subject), "isbn", "issn", "oclcnum".
-        scope: "everything" for local catalogue + subscribed databases, "catalogue" for local only, "books_videos" for the books/videos scope.
-        sort_by: "rank" (relevance, default), "date" (newest first), "title" (alphabetical).
-        limit: Number of results to return (1-50, default 10).
-        offset: Pagination offset (default 0). Use to get the next page of results.
-        resource_type: Filter by type -- "books", "articles", "journals", "databases", "videos", "dissertations", "conference_proceedings".
-        date_from: Start year filter (YYYY format, e.g. "2020").
-        date_to: End year filter (YYYY format, e.g. "2025").
-        peer_reviewed: Set to true to show only peer-reviewed items.
-        include_unavailable: Set to true to also include article-index (CDI)
-            records the library has NO full text access to (Primo's
-            "expanded" search). Default (false) restricts results to
-            accessible material, which is what holdings and access
-            confirmation requires. Only set true when the user explicitly
-            wants to discover material beyond the library's collection,
-            e.g. for interlibrary loan or comprehensive literature mapping.
-        recommend_librarians: Set to false to suppress inline librarian
-            recommendations for this search. Inline recommendations also
-            require PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS=true. When shown,
-            callers should include the bottom "Recommended librarian help:" section
-            when summarising Primo results.
-        librarian_limit: Number of librarian recommendations to include
-            inline. Defaults to 2 and is capped at 3.
-
-    Returns:
-        Formatted search results with title, authors, year, identifiers,
-        availability, and any bottom "Recommended librarian help:" section.
+    The caller-facing scope and zero-result retry policy plus the full
+    argument reference live in policy.PRIMO_SEARCH_DESCRIPTION, which is
+    served as this tool's description.
     """
     try:
         client = _get_client(ctx)

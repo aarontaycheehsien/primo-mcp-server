@@ -206,13 +206,26 @@ async def test_primo_search_zero_results_guides_llm_iteration():
     assert "combine all relevant results found across attempts" in output
 
 
-def test_primo_search_docstring_documents_dataset_database_first_policy():
-    doc = primo_search.__doc__ or ""
+def test_primo_search_description_documents_dataset_database_first_policy():
+    from primo_mcp_server.policy import PRIMO_SEARCH_DESCRIPTION
 
-    assert "For dataset or data-source requests" in doc
-    assert 'scope="catalogue"' in doc
-    assert 'resource_type="databases"' in doc
-    assert "to articles or books" in doc
+    assert "For dataset or data-source requests" in PRIMO_SEARCH_DESCRIPTION
+    assert 'scope="catalogue"' in PRIMO_SEARCH_DESCRIPTION
+    assert 'resource_type="databases"' in PRIMO_SEARCH_DESCRIPTION
+    assert "to articles or books" in PRIMO_SEARCH_DESCRIPTION
+
+
+async def test_primo_search_tool_serves_the_policy_description():
+    from primo_mcp_server.policy import PRIMO_SEARCH_DESCRIPTION, SERVER_INSTRUCTIONS
+    from primo_mcp_server.server import mcp
+
+    tools = await mcp.list_tools()
+    search_tool = next(t for t in tools if t.name == "primo_search")
+
+    assert search_tool.description == PRIMO_SEARCH_DESCRIPTION
+    # The server instructions carry the same single-source policy prose.
+    assert "Scope selection policy for callers:" in SERVER_INSTRUCTIONS
+    assert "Zero-result policy for callers:" in SERVER_INSTRUCTIONS
 
 
 async def test_primo_get_record_smoke_does_not_return_unexpected_error():
