@@ -69,6 +69,36 @@ def _format_availability(record: PrimoRecord) -> str:
     return " | ".join(parts) if parts else "Check availability in OneSearch"
 
 
+def _format_location(record: PrimoRecord) -> str:
+    """One-line shelf location for the record's first physical holding."""
+    if not record.locations:
+        return ""
+    loc = record.locations[0]
+    text = ", ".join(p for p in (loc.library, loc.location) if p)
+    if loc.call_number:
+        text = f"{text} -- {loc.call_number}" if text else loc.call_number
+    if loc.status:
+        text += f" ({loc.status.replace('_', ' ')})"
+    extra = len(record.locations) - 1
+    if extra > 0:
+        text += f" | +{extra} more location{'s' if extra > 1 else ''}"
+    return text
+
+
+def _format_access_link(record: PrimoRecord) -> str:
+    """Markdown link to the best direct access route for the record.
+
+    Prefers a direct full-text link (linktorsrc); falls back to the Alma
+    link-resolver openurl, which routes through the library's proxy.
+    """
+    if record.access_links:
+        link = record.access_links[0]
+        return f"[{_markdown_link_text(link.label)}]({link.url})"
+    if record.openurl:
+        return f"[Full text via library]({record.openurl})"
+    return ""
+
+
 def _derive_discovery_base_url(base_url: str) -> str:
     """Derive the Primo discovery app root from a Primo API base URL."""
     trimmed = base_url.rstrip("/")
@@ -431,6 +461,14 @@ def format_search_results(
             status_parts.append("Peer-reviewed")
         status_parts.append(f"Availability: {_format_availability(record)}")
         lines.append(f"    {' | '.join(status_parts)}")
+
+        location = _format_location(record)
+        if location:
+            lines.append(f"    Location: {location}")
+        access = _format_access_link(record)
+        if access:
+            lines.append(f"    Access: {access}")
+
         lines.append(f"    Record ID: {record.record_id}")
         lines.append("")
 
@@ -498,6 +536,18 @@ def format_record_detail(record: PrimoRecord, config: PrimoConfig | None = None)
 
     # Availability
     lines.append(f"\nAvailability: {_format_availability(record)}")
+    for loc in record.locations:
+        shelf = ", ".join(p for p in (loc.library, loc.location) if p)
+        if loc.call_number:
+            shelf = f"{shelf} -- {loc.call_number}" if shelf else loc.call_number
+        if loc.status:
+            shelf += f" ({loc.status.replace('_', ' ')})"
+        if shelf:
+            lines.append(f"Location: {shelf}")
+    for link in record.access_links:
+        lines.append(f"Access: [{_markdown_link_text(link.label)}]({link.url})")
+    if not record.access_links and record.openurl:
+        lines.append(f"Access: [Full text via library]({record.openurl})")
     if record.source_label:
         lines.append(f"Source: {record.source_label}")
 

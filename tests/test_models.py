@@ -400,3 +400,90 @@ class TestFacetParsing:
         assert response.facets == []
 
 
+class TestDeliveryParsing:
+    def _doc(self, delivery: dict) -> dict:
+        return {
+            "pnx": {
+                "display": {"title": ["T"]},
+                "control": {"recordid": ["alma1"]},
+            },
+            "delivery": delivery,
+        }
+
+    def test_parses_locations_and_dedupes_bestlocation(self):
+        shelf = {
+            "mainLocation": "Li Ka Shing Library",
+            "subLocation": "Books Level 3",
+            "callNumber": "HB501 .P43613 2014",
+            "availabilityStatus": "available",
+        }
+        other = {
+            "mainLocation": "Law Library",
+            "subLocation": "Reserves",
+            "callNumber": "K1 .X 2020",
+            "availabilityStatus": "on_loan",
+        }
+        record = PrimoRecord.from_api_doc(
+            self._doc(
+                {
+                    "bestlocation": {**shelf, "stackMapUrl": ""},
+                    "holding": [shelf, other],
+                }
+            )
+        )
+        assert [(l.library, l.location, l.call_number, l.status) for l in record.locations] == [
+            ("Li Ka Shing Library", "Books Level 3", "HB501 .P43613 2014", "available"),
+            ("Law Library", "Reserves", "K1 .X 2020", "on_loan"),
+        ]
+
+    def test_parses_access_links_and_cleans_subfield_labels(self):
+        record = PrimoRecord.from_api_doc(
+            self._doc(
+                {
+                    "link": [
+                        {"linkType": "thumbnail", "linkURL": "https://x/thumb"},
+                        {
+                            "linkType": "linktorsrc",
+                            "displayLabel": "$$Elinktorsrc",
+                            "linkURL": "https://www.jstor.org/stable/1",
+                        },
+                        {
+                            "linkType": "linktorsrc",
+                            "displayLabel": "Full Text via Ebook Central",
+                            "linkURL": "http://libproxy.smu.edu.sg/login?url=x",
+                        },
+                        {
+                            "linkType": "linktorsrc",
+                            "displayLabel": "Duplicate",
+                            "linkURL": "https://www.jstor.org/stable/1",
+                        },
+                    ]
+                }
+            )
+        )
+        assert [(l.label, l.url) for l in record.access_links] == [
+            ("Full text", "https://www.jstor.org/stable/1"),
+            ("Full Text via Ebook Central", "http://libproxy.smu.edu.sg/login?url=x"),
+        ]
+
+    def test_openurl_spaces_are_encoded_for_markdown(self):
+        record = PrimoRecord.from_api_doc(
+            self._doc({"almaOpenurl": "https://resolver/openurl?ctx_tim=2026-07-04 09:12:36"})
+        )
+        assert " " not in record.openurl
+        assert record.openurl.endswith("ctx_tim=2026-07-04%2009:12:36")
+
+    def test_delivery_category_falls_back_to_doc_level(self):
+        record = PrimoRecord.from_api_doc(
+            self._doc({"deliveryCategory": ["Alma-P"]})
+        )
+        assert record.delivery_category == "Alma-P"
+
+    def test_malformed_delivery_block_is_ignored(self):
+        doc = self._doc({"bestlocation": "junk", "holding": "junk", "link": "junk"})
+        record = PrimoRecord.from_api_doc(doc)
+        assert record.locations == []
+        assert record.access_links == []
+        doc["delivery"] = "junk"
+        record = PrimoRecord.from_api_doc(doc)
+        assert record.locations == []

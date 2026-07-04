@@ -174,6 +174,79 @@ def _clean_names(
     return names
 
 
+class HoldingLocation(BaseModel):
+    """A physical holding location for a record."""
+
+    library: str = ""
+    location: str = ""
+    call_number: str = ""
+    status: str = ""
+
+
+class AccessLink(BaseModel):
+    """A direct electronic access link for a record."""
+
+    label: str = ""
+    url: str = ""
+
+
+def _parse_locations(delivery: dict) -> list[HoldingLocation]:
+    """Parse bestlocation/holding entries from a doc-level delivery block."""
+    raw_entries: list[Any] = []
+    best = delivery.get("bestlocation")
+    if isinstance(best, dict):
+        raw_entries.append(best)
+    holding = delivery.get("holding")
+    if isinstance(holding, list):
+        raw_entries.extend(holding)
+
+    locations: list[HoldingLocation] = []
+    seen: set[tuple[str, str, str]] = set()
+    for entry in raw_entries:
+        if not isinstance(entry, dict):
+            continue
+        location = HoldingLocation(
+            library=str(entry.get("mainLocation") or "").strip(),
+            location=str(entry.get("subLocation") or "").strip(),
+            call_number=str(entry.get("callNumber") or "").strip(),
+            status=str(entry.get("availabilityStatus") or "").strip(),
+        )
+        # bestlocation usually repeats the first holding; dedupe on shelf.
+        key = (location.library, location.location, location.call_number)
+        if any(key) and key not in seen:
+            seen.add(key)
+            locations.append(location)
+    return locations
+
+
+def _parse_access_links(delivery: dict) -> list[AccessLink]:
+    """Parse direct full-text links (linktorsrc) from a delivery block."""
+    links: list[AccessLink] = []
+    seen: set[str] = set()
+    for raw in delivery.get("link") or []:
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get("linkType") or "").strip().lower() != "linktorsrc":
+            continue
+        url = str(raw.get("linkURL") or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        label = str(raw.get("displayLabel") or "").strip()
+        # Unresolved labels come through as PNX subfield codes ("$$Elinktorsrc").
+        if not label or label.startswith("$$"):
+            label = "Full text"
+        links.append(AccessLink(label=label, url=url))
+    return links
+
+
+def _parse_openurl(delivery: dict) -> str:
+    """Return the Alma link-resolver openurl, made safe for Markdown links."""
+    openurl = str(delivery.get("almaOpenurl") or "").strip()
+    # Live openurls carry literal spaces (e.g. in ctx_tim timestamps).
+    return openurl.replace(" ", "%20")
+
+
 class PrimoRecord(BaseModel):
     """A normalised Primo catalogue record."""
 
@@ -217,6 +290,11 @@ class PrimoRecord(BaseModel):
     # Availability
     fulltext_available: bool = False
     delivery_category: str = ""
+    # From the doc-level delivery block: where physical copies sit, direct
+    # electronic access links, and the Alma link-resolver openurl.
+    locations: list[HoldingLocation] = Field(default_factory=list)
+    access_links: list[AccessLink] = Field(default_factory=list)
+    openurl: str = ""
 
     # Relevance
     score: float = 0.0
@@ -231,6 +309,12 @@ class PrimoRecord(BaseModel):
         addata = pnx.get("addata", {})
         search = pnx.get("search", {})
         delivery = pnx.get("delivery", {})
+        # Search docs and direct full-display responses both carry a rich
+        # doc-level delivery block (holdings, links, openurl) alongside the
+        # classic pnx delivery tokens.
+        doc_delivery = doc.get("delivery")
+        if not isinstance(doc_delivery, dict):
+            doc_delivery = {}
 
         # Identifiers and DOI. Prefer the structured addata/doi field (clean
         # bare DOIs in CDI records), falling back to DOIs found in
@@ -310,7 +394,11 @@ class PrimoRecord(BaseModel):
                 _to_list(addata.get("addau")), split=False, strip_relators=False
             ),
             fulltext_available=_fulltext_available(delivery.get("fulltext")),
-            delivery_category=_first_or_empty(delivery.get("delcategory")),
+            delivery_category=_first_or_empty(delivery.get("delcategory"))
+                or _first_or_empty(doc_delivery.get("deliveryCategory")),
+            locations=_parse_locations(doc_delivery),
+            access_links=_parse_access_links(doc_delivery),
+            openurl=_parse_openurl(doc_delivery),
             score=score,
             context=doc.get("context", ""),
         )

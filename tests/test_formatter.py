@@ -12,7 +12,13 @@ from primo_mcp_server.formatter import (
     format_suggestions,
     record_link,
 )
-from primo_mcp_server.models import Facet, FacetValue, PrimoRecord, SearchResponse
+from primo_mcp_server.models import (
+    AccessLink,
+    Facet,
+    FacetValue,
+    PrimoRecord,
+    SearchResponse,
+)
 
 
 def _smu_config(**overrides) -> PrimoConfig:
@@ -504,3 +510,89 @@ class TestCompoundQueryLinks:
         assert "mode=advanced" in output
 
 
+class TestHoldingsAndAccessDisplay:
+    def _physical_record(self) -> PrimoRecord:
+        return PrimoRecord(
+            record_id="alma9922481002601",
+            title="Capital in the twenty-first century",
+            resource_type="book",
+            creators=["Piketty, Thomas"],
+            creation_date="2014",
+            locations=[
+                {
+                    "library": "Li Ka Shing Library",
+                    "location": "Books Level 3",
+                    "call_number": "HB501 .P43613 2014",
+                    "status": "available",
+                },
+                {
+                    "library": "Law Library",
+                    "location": "Reserves",
+                    "call_number": "K1 .X 2020",
+                    "status": "on_loan",
+                },
+            ],
+        )
+
+    def _online_record(self) -> PrimoRecord:
+        return PrimoRecord(
+            record_id="alma99307218302601",
+            title="Capital in the Twenty-First Century",
+            resource_type="book",
+            fulltext_available=True,
+            access_links=[
+                {"label": "Full text", "url": "https://www.jstor.org/stable/1"}
+            ],
+        )
+
+    def test_search_results_show_location_with_more_marker(self):
+        response = SearchResponse.model_validate(
+            {"info": {"total": 1}, "records": [self._physical_record()]}
+        )
+        output = format_search_results(response, "capital")
+        assert (
+            "    Location: Li Ka Shing Library, Books Level 3 -- "
+            "HB501 .P43613 2014 (available) | +1 more location" in output
+        )
+
+    def test_search_results_show_access_link(self):
+        response = SearchResponse.model_validate(
+            {"info": {"total": 1}, "records": [self._online_record()]}
+        )
+        output = format_search_results(response, "capital")
+        assert "    Access: [Full text](https://www.jstor.org/stable/1)" in output
+
+    def test_search_results_fall_back_to_openurl(self):
+        record = PrimoRecord(
+            record_id="cdi_x",
+            title="Some article",
+            openurl="https://resolver/openurl?a=1",
+        )
+        response = SearchResponse.model_validate(
+            {"info": {"total": 1}, "records": [record]}
+        )
+        output = format_search_results(response, "test")
+        assert (
+            "    Access: [Full text via library](https://resolver/openurl?a=1)"
+            in output
+        )
+
+    def test_record_detail_lists_all_locations_and_links(self):
+        record = self._physical_record().model_copy(
+            update={
+                "access_links": [
+                    AccessLink(
+                        label="Full text", url="https://www.jstor.org/stable/1"
+                    ),
+                    AccessLink(label="Ebook Central", url="https://ebook/x"),
+                ]
+            }
+        )
+        output = format_record_detail(record)
+        assert (
+            "Location: Li Ka Shing Library, Books Level 3 -- "
+            "HB501 .P43613 2014 (available)" in output
+        )
+        assert "Location: Law Library, Reserves -- K1 .X 2020 (on loan)" in output
+        assert "Access: [Full text](https://www.jstor.org/stable/1)" in output
+        assert "Access: [Ebook Central](https://ebook/x)" in output

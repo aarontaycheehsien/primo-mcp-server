@@ -19,6 +19,7 @@ and Unicode-safe handling for Chinese records.
 - Recommend configured SMU librarians from search queries and Primo metadata
 - Append a "Result landscape" facet summary (resource types, top subjects, creators, journals, languages, availability, publication years) so zero-result and too-many-result searches can be refined from data instead of guesswork
 - Compound boolean queries: multi-clause AND/OR/NOT with contains/exact/begins_with operators for known-item lookups (title AND creator), exact-title checks, and OR expansion
+- Show physical shelf locations (library, location, call number, availability status) and direct full-text access links (proxied resource links, Alma link-resolver openurl) in search results and record details
 
 ## Quick Start for SMU
 
