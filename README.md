@@ -165,6 +165,7 @@ environment variables:
 | `PRIMO_LIBRARIANS_FILE` | unset | External JSON librarian directory used for recommendations |
 | `PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS` | `true` | Append a bottom `Recommended librarian help:` section to `primo_search` output |
 | `PRIMO_LIBRARIAN_MIN_SCORE` | `5.0` | Minimum deterministic match score required before showing a recommendation |
+| `PRIMO_RECOMMEND_LOG_FILE` | unset | Opt-in JSONL log of recommendation outcomes (query, status, match/near-miss ids and scores) for triaging real queries into the golden eval set |
 | `PRIMO_LIBRARIAN_SEMANTIC_FALLBACK` | `false` | Enable the embedding path used when keyword matching finds nothing or matches weakly |
 | `PRIMO_EMBEDDING_API_KEY` | unset | Google Gemini API key for the semantic fallback |
 | `PRIMO_EMBEDDING_MODEL` | `gemini-embedding-001` | Embedding model for the semantic fallback |

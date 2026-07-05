@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import AsyncIterator
 
 import httpx
@@ -23,7 +27,12 @@ from primo_mcp_server.librarians import (
 )
 from primo_mcp_server.policy import PRIMO_SEARCH_DESCRIPTION, SERVER_INSTRUCTIONS
 from primo_mcp_server.query import QueryClause
-from primo_mcp_server.recommendation import recommend_with_fallback
+from primo_mcp_server.recommendation import (
+    RecommendationOutcome,
+    recommend_with_fallback,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -102,6 +111,7 @@ async def _format_recommendations_for_records(
         specificity=specificity,
         embedding_timeout=embedding_timeout,
     )
+    _log_recommendation_outcome(config, query, outcome)
     return format_librarian_recommendations(
         outcome.matches,
         query,
@@ -109,6 +119,47 @@ async def _format_recommendations_for_records(
         semantic_skipped=outcome.semantic_skipped,
         near_misses=outcome.near_misses,
     )
+
+
+def _log_recommendation_outcome(
+    config: PrimoConfig, query: str, outcome: RecommendationOutcome
+) -> None:
+    """Append one JSONL line per recommendation outcome (opt-in).
+
+    The log exists to close the tuning loop: the golden eval set can only
+    grow from real queries, and without a record of what matched (or
+    near-missed) at what score, every mis-routed live query is lost. Logged
+    only at the server layer so the offline eval harness never logs, and
+    fail-silent so an unwritable path can never break a recommendation.
+    """
+    if not config.recommend_log_file:
+        return
+
+    def entry_for(match) -> dict:
+        return {
+            "id": match.librarian.id,
+            "score": match.score,
+            "terms": match.matched_terms,
+            "fields": match.evidence_fields,
+        }
+
+    entry: dict = {
+        "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "query": query,
+        "status": "matched" if outcome.matches else "no_match",
+        "matches": [entry_for(match) for match in outcome.matches],
+        "near_misses": [entry_for(near) for near in outcome.near_misses],
+    }
+    if outcome.semantic_error:
+        entry["semantic_error"] = outcome.semantic_error
+    if outcome.semantic_skipped:
+        entry["semantic_skipped"] = outcome.semantic_skipped
+    try:
+        path = Path(config.recommend_log_file).expanduser()
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError as e:
+        logger.warning("Could not write recommendation log: %s", e)
 
 
 # ---------------------------------------------------------------------------

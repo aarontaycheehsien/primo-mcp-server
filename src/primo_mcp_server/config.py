@@ -52,6 +52,12 @@ class PrimoConfig(BaseSettings):
     librarians_file: str | None = None
     inline_librarian_recommendations: bool = True
     librarian_min_score: float = 5.0
+    # Opt-in JSONL log of recommendation outcomes (query, status, match and
+    # near-miss ids with scores). Exists to close the tuning loop: real
+    # queries that matched wrongly or missed can be triaged into the golden
+    # eval set instead of being lost. Local file, appended per outcome;
+    # write failures never affect the recommendation itself.
+    recommend_log_file: str | None = None
 
     # Optional semantic (embedding) fallback for librarian recommendations.
     # Consulted when the deterministic keyword matcher finds no match, or when

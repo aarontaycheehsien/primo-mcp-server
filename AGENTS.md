@@ -127,6 +127,11 @@ before and after and report the delta:
 python -m primo_mcp_server.evaluate_recommendations librarian-eval.json --keyword-only
 ```
 
+Set PRIMO_RECOMMEND_LOG_FILE to append a JSONL line per live recommendation
+outcome (query, status, match and near-miss ids with scores). Triage
+mis-routed or missed real queries from that log into `librarian-eval.json`;
+the golden set only stays meaningful if it grows from real traffic.
+
 ## Conventions
 
 - Australian English (en-AU)

@@ -505,3 +505,58 @@ async def test_primo_search_no_match_shows_closest_profiles_with_evidence(tmp_pa
     assert "Evidence: matched terms:" in output
     assert "(below the confidence threshold)" in output
     assert "closest configured contact" in output
+
+
+async def test_recommendation_outcomes_are_logged_when_opted_in(tmp_path):
+    log_path = tmp_path / "recommend.jsonl"
+
+    # A matched outcome and a no_match outcome (unreachable threshold)
+    # both append one line.
+    await primo_search(
+        _fake_context(
+            config_overrides={
+                "librarians_file": _write_librarians_file(tmp_path),
+                "recommend_log_file": str(log_path),
+            }
+        ),
+        "executive compensation",
+        scope="catalogue",
+    )
+    await primo_search(
+        _fake_context(
+            config_overrides={
+                "librarians_file": _write_librarians_file(tmp_path),
+                "recommend_log_file": str(log_path),
+                "librarian_min_score": 10_000.0,
+            }
+        ),
+        "executive compensation",
+        scope="catalogue",
+    )
+
+    lines = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(lines) == 2
+    matched, missed = lines
+    assert matched["status"] == "matched"
+    assert matched["query"] == "executive compensation"
+    assert matched["matches"][0]["id"] == "accounting"
+    assert matched["matches"][0]["terms"]
+    assert missed["status"] == "no_match"
+    assert missed["matches"] == []
+    assert missed["near_misses"][0]["id"] == "accounting"
+    assert "time" in matched
+
+
+async def test_no_log_file_is_written_without_opt_in(tmp_path):
+    await primo_search(
+        _fake_context(
+            config_overrides={"librarians_file": _write_librarians_file(tmp_path)}
+        ),
+        "executive compensation",
+        scope="catalogue",
+    )
+
+    assert not list(tmp_path.glob("*.jsonl"))
