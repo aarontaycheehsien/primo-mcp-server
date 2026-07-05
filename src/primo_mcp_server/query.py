@@ -71,6 +71,27 @@ _RESOURCE_TYPE_ALIASES = {
     "conference proceedings": "conference_proceedings",
 }
 
+# Caller-friendly aliases for Primo facet field names, used by the generic
+# facet_filters/facet_exclusions parameters. Keys not listed here pass
+# through unchanged (after "facet_" prefix stripping), so institution-local
+# facets (local1..local50, lds*) remain reachable.
+_FACET_NAME_ALIASES = {
+    "resource_type": "rtype",
+    "type": "rtype",
+    "subject": "topic",
+    "subjects": "topic",
+    "author": "creator",
+    "journal": "jtitle",
+    "journal_title": "jtitle",
+    "language": "lang",
+    "availability": "tlevel",
+    "creation_date": "searchcreationdate",
+    "creationdate": "searchcreationdate",
+    "collection": "domain",
+}
+
+_FACET_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
 _OPERATOR_ALIASES = {
     "contains": "contains",
     "exact": "exact",
@@ -132,6 +153,47 @@ def normalise_resource_type(resource_type: str | None) -> str | None:
     if resource_type is None:
         return None
     return _normalise_alias(resource_type, _RESOURCE_TYPE_ALIASES, "resource_type")
+
+
+def normalise_facet_name(name: str) -> str:
+    """Resolve a caller-friendly facet name to Primo's facet field name.
+
+    Accepts bare names ("topic"), aliased names ("subject"), and fully
+    prefixed names ("facet_topic"); returns the bare Primo name without the
+    "facet_" prefix.
+    """
+    key = _key(name)
+    if key.startswith("facet_"):
+        key = key[len("facet_"):]
+    key = _FACET_NAME_ALIASES.get(key, key)
+    if not _FACET_NAME_RE.match(key):
+        raise ValueError(
+            f'Invalid facet name "{name}". Use a Primo facet name such as: '
+            "rtype, topic, creator, jtitle, lang, tlevel, library, domain."
+        )
+    return key
+
+
+def compile_facet_filters(
+    filters: Mapping[str, str] | None, label: str = "facet_filters"
+) -> list[str]:
+    """Compile a {facet: value} mapping into Primo qInclude/qExclude parts.
+
+    Each part is ``facet_<name>,exact,<value>``, the shape Primo's qInclude
+    and qExclude parameters share (parts joined with ``|,|``). Values are
+    matched exactly against facet values as Primo reports them, e.g. in the
+    facet summary of a previous search.
+    """
+    if not filters:
+        return []
+    parts: list[str] = []
+    for raw_name, raw_value in filters.items():
+        name = normalise_facet_name(str(raw_name))
+        value = str(raw_value).strip()
+        if not value:
+            raise ValueError(f'{label} value for "{raw_name}" is empty.')
+        parts.append(f"facet_{name},exact,{value}")
+    return parts
 
 
 def normalise_operator(operator: str) -> str:

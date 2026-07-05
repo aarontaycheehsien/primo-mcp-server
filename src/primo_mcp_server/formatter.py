@@ -320,7 +320,9 @@ def _format_result_landscape(response: SearchResponse) -> list[str]:
         "Result landscape (facets over all matching results):",
         *lines,
         "- Refine with resource_type, date_from/date_to, peer_reviewed, "
-        "or a narrower query using a subject term above.",
+        'facet_filters/facet_exclusions on a facet value above (e.g. '
+        'facet_filters={"topic": "..."}), or a narrower query using a '
+        "subject term above.",
     ]
 
 
