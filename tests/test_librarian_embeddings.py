@@ -879,3 +879,131 @@ async def test_near_miss_never_resurrects_excluded_profile(tmp_path):
     # The excluded top profile is skipped; the next-best profile stands in.
     assert result.near_miss is not None
     assert result.near_miss.librarian.id == "law"
+
+
+def _local_config(tmp_path, **overrides) -> PrimoConfig:
+    values = {
+        "librarian_semantic_fallback": True,
+        "embedding_provider": "local",
+        "embedding_cache_file": str(tmp_path / "embeddings.json"),
+        "librarian_semantic_min_similarity": 0.5,
+    }
+    values.update(overrides)
+    return PrimoConfig(**values, _env_file=None)
+
+
+@respx.mock
+async def test_local_embed_posts_openai_shape_without_auth(tmp_path):
+    from primo_mcp_server.librarian_embeddings import _local_embed
+
+    route = respx.post("http://localhost:11434/v1/embeddings").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "data": [
+                    # Deliberately out of order: index is authoritative.
+                    {"index": 1, "embedding": [0.4, 0.5]},
+                    {"index": 0, "embedding": [0.1, 0.2]},
+                ]
+            },
+        )
+    )
+
+    vectors = await _local_embed(
+        ["hello", "world"],
+        "RETRIEVAL_DOCUMENT",
+        config=_local_config(tmp_path),
+    )
+
+    assert vectors == [[0.1, 0.2], [0.4, 0.5]]
+    request = route.calls.last.request
+    assert "authorization" not in {k.lower() for k in request.headers}
+    body = json.loads(request.content)
+    assert body["model"] == "embeddinggemma"
+    # The document prompt prefix stands in for Gemini's taskType.
+    assert body["input"] == [
+        "title: none | text: hello",
+        "title: none | text: world",
+    ]
+
+
+@respx.mock
+async def test_local_embed_applies_query_prefix_and_bearer_key(tmp_path):
+    from primo_mcp_server.librarian_embeddings import _local_embed
+
+    route = respx.post("http://localhost:11434/v1/embeddings").mock(
+        return_value=httpx.Response(
+            200, json={"data": [{"index": 0, "embedding": [0.1]}]}
+        )
+    )
+
+    await _local_embed(
+        ["digital preservation"],
+        "RETRIEVAL_QUERY",
+        config=_local_config(tmp_path, embedding_api_key="local-key"),
+    )
+
+    request = route.calls.last.request
+    assert request.headers["authorization"] == "Bearer local-key"
+    body = json.loads(request.content)
+    assert body["input"] == [
+        "task: search result | query: digital preservation"
+    ]
+
+
+@respx.mock
+async def test_semantic_fallback_runs_on_local_provider(tmp_path):
+    # End to end through the provider dispatch: profile terms and the query
+    # are embedded by the local endpoint and similarity ranking works. The
+    # fake endpoint gives "preservation" texts one axis and everything else
+    # another.
+    def respond(request):
+        texts = json.loads(request.content)["input"]
+        data = [
+            {
+                "index": i,
+                "embedding": (
+                    [1.0, 0.0] if "preservation" in text.lower() else [0.0, 1.0]
+                ),
+            }
+            for i, text in enumerate(texts)
+        ]
+        return httpx.Response(200, json={"data": data})
+
+    respx.post("http://localhost:11434/v1/embeddings").mock(side_effect=respond)
+
+    result = await semantic_fallback(
+        _directory(),
+        "digital preservation of archives",
+        [],
+        _local_config(tmp_path),
+    )
+
+    assert result.error is None
+    assert [m.librarian.id for m in result.matches] == ["preservation"]
+
+
+async def test_unknown_provider_fails_closed(tmp_path):
+    result = await semantic_fallback(
+        _directory(),
+        "digital preservation of archives",
+        [],
+        _local_config(tmp_path, embedding_provider="chatgpt"),
+    )
+
+    assert result.matches == []
+    assert result.error == "RuntimeError"
+
+
+def test_model_key_isolates_local_space_from_gemini(tmp_path):
+    from primo_mcp_server.librarian_embeddings import _model_key
+
+    gemini = PrimoConfig(embedding_api_key="k", _env_file=None)
+    local = _local_config(tmp_path)
+    assert _model_key(gemini) == "gemini-embedding-001"  # legacy caches survive
+    assert _model_key(gemini) != _model_key(local)
+    # A different document prompt produces different vectors -> new key.
+    reprompted = _local_config(
+        tmp_path, embedding_local_document_prefix="clustering: "
+    )
+    assert _model_key(local) != _model_key(reprompted)

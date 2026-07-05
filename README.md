@@ -167,9 +167,14 @@ environment variables:
 | `PRIMO_LIBRARIAN_MIN_SCORE` | `5.0` | Minimum deterministic match score required before showing a recommendation |
 | `PRIMO_RECOMMEND_LOG_FILE` | unset | Opt-in JSONL log of recommendation outcomes (query, status, match/near-miss ids and scores) for triaging real queries into the golden eval set |
 | `PRIMO_LIBRARIAN_SEMANTIC_FALLBACK` | `false` | Enable the embedding path used when keyword matching finds nothing or matches weakly |
-| `PRIMO_EMBEDDING_API_KEY` | unset | Google Gemini API key for the semantic fallback |
-| `PRIMO_EMBEDDING_MODEL` | `gemini-embedding-001` | Embedding model for the semantic fallback |
-| `PRIMO_EMBEDDING_API_URL` | `https://generativelanguage.googleapis.com/v1beta` | Embedding API base URL |
+| `PRIMO_EMBEDDING_PROVIDER` | `gemini` | `gemini` for Google's hosted API, `local` for an OpenAI-compatible local endpoint (Ollama, LM Studio, llama.cpp) with no quota |
+| `PRIMO_EMBEDDING_API_KEY` | unset | Google Gemini API key (`gemini`); optional Bearer token for local runtimes that check one |
+| `PRIMO_EMBEDDING_MODEL` | `gemini-embedding-001` | Embedding model for the `gemini` provider |
+| `PRIMO_EMBEDDING_API_URL` | `https://generativelanguage.googleapis.com/v1beta` | Embedding API base URL for the `gemini` provider |
+| `PRIMO_EMBEDDING_LOCAL_URL` | `http://localhost:11434/v1` | OpenAI-compatible base URL for the `local` provider (default: Ollama) |
+| `PRIMO_EMBEDDING_LOCAL_MODEL` | `embeddinggemma` | Model name for the `local` provider |
+| `PRIMO_EMBEDDING_LOCAL_QUERY_PREFIX` | EmbeddingGemma query prompt | Prompt prefixed to query text (stands in for Gemini's taskType); for nomic-embed-text use `search_query: ` |
+| `PRIMO_EMBEDDING_LOCAL_DOCUMENT_PREFIX` | EmbeddingGemma document prompt | Prompt prefixed to profile terms; for nomic-embed-text use `search_document: `; changing it rebuilds the cache |
 | `PRIMO_LIBRARIAN_SEMANTIC_MIN_SIMILARITY` | `0.60` | Absolute cosine floor for a semantic recommendation |
 | `PRIMO_LIBRARIAN_SEMANTIC_MARGIN` | `0.08` | Self-calibrating margin: a match must exceed the mean similarity across all profiles by this much |
 | `PRIMO_LIBRARIAN_SEMANTIC_MARGIN_MIN_PROFILES` | `4` | Directory size at which the margin rule starts applying |
@@ -226,6 +231,40 @@ similarity distribution for representative test queries:
 ```bash
 python -m primo_mcp_server.calibrate_embeddings "systematic review screening" "GIS data for urban planning"
 ```
+
+#### Local embeddings (no quota)
+
+The Gemini free tier is rate-limited; `PRIMO_EMBEDDING_PROVIDER=local`
+switches the same fallback to any OpenAI-compatible `/embeddings` endpoint
+running on your own machine -- Ollama, LM Studio, or a llama.cpp server --
+with no quota and no key. The workload is small: a directory of up to ~30
+profiles embeds once (then cached), and each search costs one query
+embedding, so a small CPU model is entirely sufficient. With Ollama:
+
+```bash
+ollama pull embeddinggemma
+```
+
+```env
+PRIMO_LIBRARIAN_SEMANTIC_FALLBACK=true
+PRIMO_EMBEDDING_PROVIDER=local
+# Defaults already target Ollama + EmbeddingGemma; override for other
+# runtimes or models:
+# PRIMO_EMBEDDING_LOCAL_URL=http://localhost:1234/v1   (LM Studio)
+# PRIMO_EMBEDDING_LOCAL_MODEL=nomic-embed-text
+# PRIMO_EMBEDDING_LOCAL_QUERY_PREFIX=search_query: 
+# PRIMO_EMBEDDING_LOCAL_DOCUMENT_PREFIX=search_document: 
+```
+
+The query/document prefixes stand in for Gemini's `taskType` parameter
+(EmbeddingGemma and nomic both use asymmetric retrieval prompts); set both
+empty if your runtime applies its own prompt template. Two caveats: the
+cosine floor default (0.60) was tuned for `gemini-embedding-001`, so re-run
+`calibrate_embeddings` after switching models (the mean+margin rule
+self-calibrates, the floor does not); and the first request after the
+runtime starts may load the model into memory, which can exceed the tight
+inline-search budget -- the explicit `primo_recommend_librarians` tool has
+the full timeout and will warm it up.
 
 The layer fails closed — only configured profiles are ever returned, and any
 embedding error degrades to the keyword outcome — but not silently: errors are

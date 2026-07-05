@@ -65,9 +65,30 @@ class PrimoConfig(BaseSettings):
     # Opt in by setting librarian_semantic_fallback=true and providing a
     # Gemini API key. Defaults target Google's gemini-embedding-001 free tier.
     librarian_semantic_fallback: bool = False
+    # "gemini" calls Google's hosted API (rate-limited free tier); "local"
+    # calls an OpenAI-compatible /embeddings endpoint such as Ollama,
+    # LM Studio, or a llama.cpp server, with no quota at all. A directory of
+    # up to ~30 profiles embeds once in seconds on CPU and is cached; only
+    # one query embedding is computed per search, so small local models are
+    # entirely sufficient. When switching providers or models, re-run
+    # calibrate_embeddings: the cosine floor below was tuned for
+    # gemini-embedding-001 and other models have different similarity
+    # distributions (the mean+margin rule self-calibrates, the floor does not).
+    embedding_provider: str = "gemini"
     embedding_api_url: str = "https://generativelanguage.googleapis.com/v1beta"
     embedding_model: str = "gemini-embedding-001"
     embedding_api_key: str | None = None
+    # Settings for embedding_provider="local". The defaults target Ollama
+    # running EmbeddingGemma (`ollama pull embeddinggemma`), Google's 300M
+    # local embedder; any OpenAI-compatible endpoint and model works. The
+    # prefixes are EmbeddingGemma's recommended task prompts and stand in
+    # for Gemini's taskType parameter -- for nomic-embed-text use
+    # "search_query: " and "search_document: "; set both empty when the
+    # serving runtime applies its own prompt template.
+    embedding_local_url: str = "http://localhost:11434/v1"
+    embedding_local_model: str = "embeddinggemma"
+    embedding_local_query_prefix: str = "task: search result | query: "
+    embedding_local_document_prefix: str = "title: none | text: "
     # Absolute cosine sanity floor. gemini-embedding-001 is anisotropic
     # (unrelated text sits near ~0.5), so this floor alone is fragile across
     # directory sizes; the self-calibrating margin below does the real work

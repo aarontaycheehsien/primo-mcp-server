@@ -60,11 +60,18 @@ score thresholds, margins, timeouts, and the query token gate):
 - PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS -- append a "Recommended librarian
   help:" section to primo_search results (default true)
 - PRIMO_LIBRARIAN_MIN_SCORE -- keyword match acceptance threshold
-- PRIMO_LIBRARIAN_SEMANTIC_FALLBACK -- enable the Gemini embedding fallback
-  (default false; requires an API key)
+- PRIMO_LIBRARIAN_SEMANTIC_FALLBACK -- enable the embedding fallback
+  (default false)
+- PRIMO_EMBEDDING_PROVIDER -- "gemini" (hosted, needs an API key) or
+  "local" (any OpenAI-compatible endpoint such as Ollama; no quota, no key)
 - PRIMO_EMBEDDING_API_KEY -- Gemini API key for the semantic fallback
-- PRIMO_EMBEDDING_MODEL / PRIMO_EMBEDDING_API_URL -- embedding endpoint
+- PRIMO_EMBEDDING_MODEL / PRIMO_EMBEDDING_API_URL -- gemini endpoint
   (defaults target gemini-embedding-001)
+- PRIMO_EMBEDDING_LOCAL_URL / PRIMO_EMBEDDING_LOCAL_MODEL -- local endpoint
+  (defaults target Ollama + embeddinggemma); the LOCAL_QUERY_PREFIX /
+  LOCAL_DOCUMENT_PREFIX prompts stand in for Gemini's taskType. Re-run the
+  calibration CLI when switching models; the cosine floor was tuned for
+  gemini-embedding-001.
 
 ## Search Scope Policy
 

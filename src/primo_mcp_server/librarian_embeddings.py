@@ -137,10 +137,24 @@ def _query_text(query: str, records: list[PrimoRecord] | None) -> str:
 
 
 def _model_key(config: PrimoConfig) -> str:
-    """Cache key covering everything that changes the embedding space."""
+    """Cache key covering everything that changes the embedding space.
+
+    The gemini format is kept unprefixed so existing caches survive this
+    code change. Local keys carry the provider, the model, and the document
+    prefix (a different prefix produces different document vectors), so
+    switching provider, model, or prompt always rebuilds rather than mixing
+    vectors from two spaces.
+    """
+    if _provider(config) == "local":
+        base = (
+            f"local:{config.embedding_local_model}"
+            f"|{config.embedding_local_document_prefix}"
+        )
+    else:
+        base = config.embedding_model
     if config.embedding_dimensions:
-        return f"{config.embedding_model}@{config.embedding_dimensions}"
-    return config.embedding_model
+        return f"{base}@{config.embedding_dimensions}"
+    return base
 
 
 def _hash(text: str, model_key: str) -> str:
@@ -248,6 +262,85 @@ async def _gemini_embed(
             embeddings = response.json()["embeddings"]
             vectors.extend(item["values"] for item in embeddings)
     return vectors
+
+
+async def _local_embed(
+    texts: Sequence[str],
+    task_type: str,
+    *,
+    config: PrimoConfig,
+    timeout: float | None = None,
+) -> list[list[float]]:
+    """Embed ``texts`` via an OpenAI-compatible ``/embeddings`` endpoint.
+
+    One endpoint shape covers the local-model ecosystem: Ollama, LM Studio,
+    llama.cpp server, and vLLM all speak it, so running the fallback without
+    Gemini quota is a matter of pointing embedding_local_url at whichever
+    runtime is installed. The OpenAI API has no taskType parameter, so the
+    configured query/document prefixes stand in (EmbeddingGemma and nomic
+    both use prompt prefixes for asymmetric retrieval). No API key is
+    required; when one is configured it is sent as a Bearer token for
+    runtimes that check.
+    """
+    base = config.embedding_local_url.rstrip("/")
+    url = f"{base}/embeddings"
+    prefix = (
+        config.embedding_local_query_prefix
+        if task_type == _TASK_QUERY
+        else config.embedding_local_document_prefix
+    )
+    headers = {}
+    if config.embedding_api_key:
+        headers["Authorization"] = f"Bearer {config.embedding_api_key}"
+
+    vectors: list[list[float]] = []
+    async with httpx.AsyncClient(
+        timeout=timeout if timeout is not None else config.embedding_timeout,
+        headers=headers,
+    ) as client:
+        for start in range(0, len(texts), _MAX_BATCH_SIZE):
+            chunk = texts[start : start + _MAX_BATCH_SIZE]
+            response = await client.post(
+                url,
+                json={
+                    "model": config.embedding_local_model,
+                    "input": [prefix + text for text in chunk],
+                },
+            )
+            response.raise_for_status()
+            data = response.json()["data"]
+            # The spec allows out-of-order items; index is authoritative.
+            data = sorted(data, key=lambda item: item.get("index", 0))
+            vectors.extend(item["embedding"] for item in data)
+    return vectors
+
+
+def _provider(config: PrimoConfig) -> str:
+    return config.embedding_provider.strip().lower()
+
+
+def _default_embedder(
+    config: PrimoConfig, timeout: float | None
+) -> Embedder:
+    """Select the embedding backend from configuration.
+
+    An unknown provider raises here, inside the fail-closed path, so a typo
+    in PRIMO_EMBEDDING_PROVIDER surfaces as a semantic-fallback error rather
+    than silently calling the wrong (possibly paid) backend.
+    """
+    provider = _provider(config)
+    if provider == "gemini":
+        return lambda texts, task_type: _gemini_embed(
+            texts, task_type, config=config, timeout=timeout
+        )
+    if provider == "local":
+        return lambda texts, task_type: _local_embed(
+            texts, task_type, config=config, timeout=timeout
+        )
+    raise RuntimeError(
+        f"Unknown embedding provider {config.embedding_provider!r}; "
+        'use "gemini" or "local".'
+    )
 
 
 # Indirection so tests can observe and skip real sleeps.
@@ -403,11 +496,7 @@ async def score_profiles(
     """
     if retries is None:
         retries = config.embedding_retry_attempts
-    embed = embedder or (
-        lambda texts, task_type: _gemini_embed(
-            texts, task_type, config=config, timeout=timeout
-        )
-    )
+    embed = embedder or _default_embedder(config, timeout)
     profile_vectors = await _load_or_build_profile_vectors(
         directory, config, embed, retries=retries
     )
