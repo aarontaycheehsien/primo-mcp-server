@@ -205,3 +205,41 @@ async def test_recommend_with_fallback_populates_near_misses_only_on_no_match():
     outcome = await recommend_with_fallback(directory, "audit fees dataset", [], config)
     assert outcome.matches
     assert outcome.near_misses == ()
+
+
+async def test_semantic_near_miss_reaches_outcome(monkeypatch):
+    from primo_mcp_server.config import PrimoConfig
+    from primo_mcp_server.librarian_embeddings import SemanticFallbackResult
+    from primo_mcp_server.librarians import LibrarianDirectory, LibrarianMatch
+    from primo_mcp_server.recommendation import recommend_with_fallback
+
+    directory = LibrarianDirectory.model_validate(
+        {
+            "librarians": [
+                {"id": "gis", "name": "GIS Librarian", "subjects": ["geospatial analysis"]}
+            ]
+        }
+    )
+    near = LibrarianMatch(
+        librarian=directory.librarians[0],
+        score=0.44,
+        evidence_fields=["semantic"],
+    )
+
+    async def fake(directory, query, records, config, *, limit=2, timeout=None, **kwargs):
+        return SemanticFallbackResult([], near_miss=near)
+
+    monkeypatch.setattr(
+        "primo_mcp_server.recommendation.semantic_fallback", fake
+    )
+    config = PrimoConfig(
+        librarian_semantic_fallback=True,
+        embedding_api_key="k",
+        _env_file=None,
+    )
+    outcome = await recommend_with_fallback(
+        directory, "mapping deprivation across neighbourhoods", [], config
+    )
+
+    assert outcome.matches == []
+    assert outcome.near_misses == (near,)

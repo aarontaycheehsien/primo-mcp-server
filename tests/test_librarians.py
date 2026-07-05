@@ -1310,3 +1310,19 @@ class TestUnorderedTokenMatching:
 
         assert exact and unordered
         assert unordered[0].score < exact[0].score
+
+
+def test_no_match_output_renders_semantic_near_miss_with_cosine():
+    directory = _directory()
+    near = LibrarianMatch(
+        librarian=directory.librarians[0],
+        score=0.4432,
+        evidence_fields=["semantic"],
+    )
+
+    output = format_librarian_recommendations([], "obscure topic", near_misses=[near])
+
+    assert "Status: no_match" in output
+    assert "Closest configured profiles" in output
+    assert "closest by semantic similarity (cosine 0.44); no keyword match" in output
+    assert "(below the confidence threshold)" in output

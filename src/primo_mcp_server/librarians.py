@@ -1008,12 +1008,18 @@ def format_librarian_recommendations(
             )
             for i, match in enumerate(near_misses, start=1):
                 librarian = match.librarian
+                if is_semantic_match(match):
+                    evidence = (
+                        "closest by semantic similarity "
+                        f"(cosine {match.score:.2f}); no keyword match"
+                    )
+                else:
+                    evidence = _format_match_evidence(match)
                 lines.append(f"{i}. Name: {_format_linked_name(librarian)}")
                 lines.append(f"   Title: {librarian.title or _UNCONFIGURED}")
                 lines.append(f"   Contact: {librarian.email or _UNCONFIGURED}")
                 lines.append(
-                    f"   Evidence: {_format_match_evidence(match)} "
-                    "(below the confidence threshold)"
+                    f"   Evidence: {evidence} (below the confidence threshold)"
                 )
             lines.append(
                 "If you still refer the user to one of these, present them "

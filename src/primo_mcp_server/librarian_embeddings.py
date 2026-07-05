@@ -74,11 +74,14 @@ class SemanticFallbackResult(NamedTuple):
     errored" instead of a misleading "no match". ``skipped`` carries a reason
     when the fallback deliberately did not run (e.g. the query is too short
     to embed reliably); ``error`` and ``skipped`` are mutually exclusive.
+    ``near_miss`` is the highest-similarity profile when the acceptance rule
+    rejected everything -- evidence for the no_match output, never a match.
     """
 
     matches: list[LibrarianMatch]
     error: str | None = None
     skipped: str | None = None
+    near_miss: LibrarianMatch | None = None
 
 
 class ProfileSimilarity(NamedTuple):
@@ -524,6 +527,25 @@ async def semantic_fallback(
     ]
     scored.sort(key=lambda item: (-item.similarity, item.librarian.name.casefold()))
     capped_limit = min(max(1, limit), _MAX_RECOMMENDATIONS)
+
+    # When the acceptance rule rejected everything, keep the closest profile
+    # (with its cosine) so a no_match outcome can show WHY nothing was good
+    # enough instead of discarding the evidence. Curator exclusions apply
+    # here too; a near-miss must never resurrect a suppressed profile.
+    near_miss: LibrarianMatch | None = None
+    if not scored:
+        rejected = [
+            s for s in similarities if not is_excluded(s.librarian, query)
+        ]
+        if rejected:
+            top = max(rejected, key=lambda s: s.similarity)
+            near_miss = LibrarianMatch(
+                librarian=top.librarian,
+                score=round(top.similarity, 4),
+                matched_terms=[],
+                evidence_fields=["semantic"],
+            )
+
     return SemanticFallbackResult(
         [
             LibrarianMatch(
@@ -533,5 +555,6 @@ async def semantic_fallback(
                 evidence_fields=["semantic"],
             )
             for similarity, librarian in scored[:capped_limit]
-        ]
+        ],
+        near_miss=near_miss,
     )

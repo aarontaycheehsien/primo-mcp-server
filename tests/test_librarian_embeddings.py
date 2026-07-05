@@ -102,13 +102,14 @@ def _config(tmp_path, **overrides) -> PrimoConfig:
 
 
 async def test_semantic_fallback_ranks_by_similarity(tmp_path):
-    matches, error, skipped = await semantic_fallback(
+    result = await semantic_fallback(
         _directory(),
         "long-term preservation of born-digital archives",
         [],
         _config(tmp_path),
         embedder=_FakeEmbedder(),
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
 
     assert error is None
     assert skipped is None
@@ -117,13 +118,14 @@ async def test_semantic_fallback_ranks_by_similarity(tmp_path):
 
 
 async def test_semantic_fallback_disabled_returns_empty(tmp_path):
-    matches, error, skipped = await semantic_fallback(
+    result = await semantic_fallback(
         _directory(),
         "digital preservation of archives",
         [],
         _config(tmp_path, librarian_semantic_fallback=False),
         embedder=_FakeEmbedder(),
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
 
     assert matches == []
     assert error is None
@@ -132,26 +134,28 @@ async def test_semantic_fallback_disabled_returns_empty(tmp_path):
 
 async def test_semantic_fallback_below_threshold_returns_empty(tmp_path):
     # No topic overlap -> similarity below the floor -> honest no-match.
-    matches, error, _ = await semantic_fallback(
+    result = await semantic_fallback(
         _directory(),
         "tropical marine biology",
         [],
         _config(tmp_path),
         embedder=_FakeEmbedder(),
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
 
     assert matches == []
     assert error is None
 
 
 async def test_semantic_fallback_ignores_record_context(tmp_path):
-    matches, _, _ = await semantic_fallback(
+    result = await semantic_fallback(
         _directory(),
         "tropical marine biology",
         [PrimoRecord(title="Digital preservation", subjects=["preservation"])],
         _config(tmp_path),
         embedder=_FakeEmbedder(),
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
 
     assert matches == []
 
@@ -160,13 +164,14 @@ async def test_semantic_fallback_degrades_on_embedder_error(tmp_path, caplog):
     async def boom(texts, task_type):
         raise RuntimeError("embedding service down")
 
-    matches, error, _ = await semantic_fallback(
+    result = await semantic_fallback(
         _directory(),
         "digital preservation of archives",
         [],
         _config(tmp_path),
         embedder=boom,
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
 
     # Fails closed, but the error is distinguishable from a genuine no-match
     # and is logged (to stderr under stdio transport) rather than swallowed.
@@ -178,13 +183,14 @@ async def test_semantic_fallback_degrades_on_embedder_error(tmp_path, caplog):
 async def test_short_query_is_gated_before_embedding(tmp_path):
     embedder = _FakeEmbedder()
 
-    matches, error, skipped = await semantic_fallback(
+    result = await semantic_fallback(
         _directory(),
         "preservation",
         [],
         _config(tmp_path),
         embedder=embedder,
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
 
     # One topical word is below the default gate of two; the fallback is
     # skipped with a reason and no embedding request is ever made.
@@ -198,13 +204,14 @@ async def test_short_query_is_gated_before_embedding(tmp_path):
 async def test_filler_only_query_is_gated(tmp_path):
     embedder = _FakeEmbedder()
 
-    matches, _, skipped = await semantic_fallback(
+    result = await semantic_fallback(
         _directory(),
         "can you help me find some research support please",
         [],
         _config(tmp_path),
         embedder=embedder,
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
 
     # Stopwords and filler words contribute no topical tokens.
     assert matches == []
@@ -215,13 +222,14 @@ async def test_filler_only_query_is_gated(tmp_path):
 async def test_query_gate_can_be_disabled(tmp_path):
     # The same one-word query that the default gate skips matches when the
     # gate is configured off.
-    matches, error, skipped = await semantic_fallback(
+    result = await semantic_fallback(
         _directory(),
         "preservation",
         [],
         _config(tmp_path, librarian_semantic_min_query_tokens=1),
         embedder=_FakeEmbedder(),
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
 
     assert error is None
     assert skipped is None
@@ -241,13 +249,14 @@ async def test_margin_rule_rejects_uniform_similarities(tmp_path):
         }
     )
 
-    matches, error, _ = await semantic_fallback(
+    result = await semantic_fallback(
         directory,
         "law and legislation",
         [],
         _config(tmp_path, librarian_semantic_min_similarity=0.1),
         embedder=_FakeEmbedder(),
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
 
     assert matches == []
     assert error is None
@@ -265,13 +274,14 @@ async def test_margin_rule_accepts_profile_that_stands_out(tmp_path):
         }
     )
 
-    matches, _, _ = await semantic_fallback(
+    result = await semantic_fallback(
         directory,
         "law and legislation",
         [],
         _config(tmp_path, librarian_semantic_min_similarity=0.1),
         embedder=_FakeEmbedder(),
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
 
     assert [m.librarian.id for m in matches] == ["law"]
 
@@ -280,7 +290,7 @@ async def test_tiny_directory_requires_top_gap(tmp_path):
     # Below the margin's profile minimum the mean is noise, so uniform
     # similarity in a tiny directory means the space cannot separate the
     # profiles: nothing is returned even above the floor.
-    matches, error, _ = await semantic_fallback(
+    result = await semantic_fallback(
         _directory(),
         "law and bibliometric preservation",
         [],
@@ -288,6 +298,7 @@ async def test_tiny_directory_requires_top_gap(tmp_path):
         limit=2,
         embedder=_FakeEmbedder(),
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
 
     assert matches == []
     assert error is None
@@ -296,7 +307,7 @@ async def test_tiny_directory_requires_top_gap(tmp_path):
 async def test_tiny_directory_accepts_clear_top_profile(tmp_path):
     # A profile that clearly leads the runner-up is accepted -- and only
     # top-1, since the gap is the evidence that justified accepting it.
-    matches, _, _ = await semantic_fallback(
+    result = await semantic_fallback(
         _directory(),
         "preservation of digital archives",
         [],
@@ -304,6 +315,7 @@ async def test_tiny_directory_accepts_clear_top_profile(tmp_path):
         limit=2,
         embedder=_FakeEmbedder(),
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
 
     assert [m.librarian.id for m in matches] == ["preservation"]
 
@@ -317,13 +329,14 @@ async def test_single_profile_directory_uses_floor_only(tmp_path):
         }
     )
 
-    matches, _, _ = await semantic_fallback(
+    result = await semantic_fallback(
         directory,
         "law and legislation",
         [],
         _config(tmp_path),
         embedder=_FakeEmbedder(),
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
 
     assert [m.librarian.id for m in matches] == ["law"]
 
@@ -350,13 +363,14 @@ async def test_padded_profile_matches_by_its_best_term(tmp_path):
         }
     )
 
-    matches, error, _ = await semantic_fallback(
+    result = await semantic_fallback(
         directory,
         "preservation of digital archives",
         [],
         _config(tmp_path, librarian_semantic_min_similarity=0.6),
         embedder=_FakeEmbedder(),
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
 
     assert error is None
     assert [m.librarian.id for m in matches] == ["padded"]
@@ -406,13 +420,14 @@ async def test_old_cache_format_is_discarded_and_rebuilt(tmp_path):
     )
     embedder = _FakeEmbedder()
 
-    matches, error, _ = await semantic_fallback(
+    result = await semantic_fallback(
         _directory(),
         "digital preservation of archives",
         [],
         config,
         embedder=embedder,
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
 
     assert error is None
     assert any(task == "RETRIEVAL_DOCUMENT" for _, task in embedder.calls)
@@ -479,13 +494,14 @@ async def test_rate_limited_rebuild_waits_and_retries(tmp_path, monkeypatch):
                 raise _http_error(headers={"retry-after": "7"})
             return await super().__call__(texts, task_type)
 
-    matches, error, _ = await semantic_fallback(
+    result = await semantic_fallback(
         _directory(),
         "digital preservation of archives",
         [],
         _config(tmp_path),
         embedder=_RateLimitedOnce(),
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
 
     # The 429 was waited out for exactly the advised delay and the call
     # succeeded on the retry instead of failing closed.
@@ -500,7 +516,7 @@ async def test_tight_timeout_opts_out_of_retry_waits(tmp_path, monkeypatch):
     async def always_rate_limited(texts, task_type):
         raise _http_error(headers={"retry-after": "60"})
 
-    matches, error, _ = await semantic_fallback(
+    result = await semantic_fallback(
         _directory(),
         "digital preservation of archives",
         [],
@@ -508,6 +524,7 @@ async def test_tight_timeout_opts_out_of_retry_waits(tmp_path, monkeypatch):
         embedder=always_rate_limited,
         timeout=2.5,  # the inline primo_search budget
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
 
     # A latency-bounded caller fails closed immediately; sleeping 60s inside
     # an ordinary search would blow the very budget the timeout protects.
@@ -524,13 +541,14 @@ async def test_non_rate_limit_http_errors_are_not_retried(tmp_path, monkeypatch)
         calls.append(task_type)
         raise _http_error(status=401)
 
-    matches, error, _ = await semantic_fallback(
+    result = await semantic_fallback(
         _directory(),
         "digital preservation of archives",
         [],
         _config(tmp_path),
         embedder=unauthorized,
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
 
     # Retrying an invalid API key would never succeed; fail closed at once.
     assert matches == []
@@ -569,25 +587,27 @@ async def test_failed_rebuild_keeps_progress_and_resumes(tmp_path):
             return await super().__call__(texts, task_type)
 
     first = _FailsAfterFirstBatch()
-    matches, error, _ = await semantic_fallback(
+    result = await semantic_fallback(
         directory,
         "digital preservation of archives",
         [],
         config,
         embedder=first,
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
     # Fails closed for this call, but the first batch of 100 is persisted.
     assert error == "RuntimeError"
     assert matches == []
 
     second = _FakeEmbedder()
-    matches, error, _ = await semantic_fallback(
+    result = await semantic_fallback(
         directory,
         "digital preservation of archives",
         [],
         config,
         embedder=second,
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
     assert error is None
     assert [m.librarian.id for m in matches] == ["preservation"]
     document_batches = [
@@ -754,7 +774,7 @@ async def test_semantic_fallback_respects_limit(tmp_path):
         }
     )
 
-    matches, _, _ = await semantic_fallback(
+    result = await semantic_fallback(
         directory,
         "law bibliometric preservation trends",
         [],
@@ -762,6 +782,7 @@ async def test_semantic_fallback_respects_limit(tmp_path):
         limit=2,
         embedder=_FakeEmbedder(),
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
 
     assert len(matches) == 2
 
@@ -786,23 +807,75 @@ async def test_semantic_fallback_respects_curator_excludes(tmp_path):
         }
     )
 
-    matches, error, _ = await semantic_fallback(
+    result = await semantic_fallback(
         directory,
         "law litigation strategy",
         [],
         _config(tmp_path),
         embedder=_FakeEmbedder(),
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
 
     assert error is None
     assert matches == []
 
     # The same directory still matches when no exclude term is present.
-    matches, _, _ = await semantic_fallback(
+    result = await semantic_fallback(
         directory,
         "case law research",
         [],
         _config(tmp_path),
         embedder=_FakeEmbedder(),
     )
+    matches, error, skipped = result.matches, result.error, result.skipped
     assert [m.librarian.id for m in matches] == ["law"]
+
+
+async def test_rejection_keeps_top_profile_as_near_miss(tmp_path):
+    # A two-topic query gives partial overlap (cosine ~0.71), below the
+    # raised floor -- the top profile must survive as an evidence-bearing
+    # near-miss rather than being discarded.
+    result = await semantic_fallback(
+        _directory(),
+        "preservation law archives",
+        [],
+        _config(tmp_path, librarian_semantic_min_similarity=0.99),
+        embedder=_FakeEmbedder(),
+    )
+
+    assert result.matches == []
+    assert result.near_miss is not None
+    assert result.near_miss.librarian.id in {"preservation", "law"}
+    assert result.near_miss.evidence_fields == ["semantic"]
+    assert 0.0 < result.near_miss.score < 0.99
+
+
+async def test_accepted_match_has_no_near_miss(tmp_path):
+    result = await semantic_fallback(
+        _directory(),
+        "long-term preservation of born-digital archives",
+        [],
+        _config(tmp_path),
+        embedder=_FakeEmbedder(),
+    )
+
+    assert result.matches
+    assert result.near_miss is None
+
+
+async def test_near_miss_never_resurrects_excluded_profile(tmp_path):
+    directory = _directory()
+    directory.librarians[0].excludes = ["preservation"]
+
+    result = await semantic_fallback(
+        directory,
+        "preservation law archives",
+        [],
+        _config(tmp_path, librarian_semantic_min_similarity=0.99),
+        embedder=_FakeEmbedder(),
+    )
+
+    assert result.matches == []
+    # The excluded top profile is skipped; the next-best profile stands in.
+    assert result.near_miss is not None
+    assert result.near_miss.librarian.id == "law"

@@ -76,6 +76,7 @@ async def recommend_with_fallback(
     ][:capped_limit]
     semantic_error: str | None = None
     semantic_skipped: str | None = None
+    semantic_near_miss: LibrarianMatch | None = None
     best_keyword_score = matches[0].score if matches else 0.0
     if config.librarian_semantic_fallback and (
         not matches
@@ -91,6 +92,7 @@ async def recommend_with_fallback(
         )
         semantic_error = semantic.error
         semantic_skipped = semantic.skipped
+        semantic_near_miss = semantic.near_miss
         keyword_ids = {match.librarian.id for match in matches}
         matches = (
             matches
@@ -102,11 +104,18 @@ async def recommend_with_fallback(
         )[:capped_limit]
 
     # When nothing cleared the threshold on either path, keep the closest
-    # keyword candidates (with their matched-term evidence) so the no_match
-    # output can show why the best candidates were not good enough.
+    # candidates so the no_match output can show why the best were not good
+    # enough. Keyword near-misses come first (matched terms explain more
+    # than a bare cosine); the semantic near-miss fills a remaining slot.
     near_misses: tuple[LibrarianMatch, ...] = ()
     if not matches:
-        near_misses = tuple(candidates[:_MAX_NEAR_MISSES])
+        combined = list(candidates[:_MAX_NEAR_MISSES])
+        if semantic_near_miss is not None and all(
+            near.librarian.id != semantic_near_miss.librarian.id
+            for near in combined
+        ):
+            combined.append(semantic_near_miss)
+        near_misses = tuple(combined[:_MAX_NEAR_MISSES])
     return RecommendationOutcome(
         matches, semantic_error, semantic_skipped, near_misses
     )
