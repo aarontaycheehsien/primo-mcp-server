@@ -38,3 +38,10 @@ def test_default_config_is_smu(monkeypatch):
     assert config.librarians_file is None
     assert config.inline_librarian_recommendations is True
     assert config.librarian_min_score == 5.0
+
+
+def test_user_agent_tracks_package_version():
+    from importlib.metadata import version
+
+    config = PrimoConfig(_env_file=None)
+    assert config.user_agent == f"primo-mcp-server/{version('primo-mcp-server')}"

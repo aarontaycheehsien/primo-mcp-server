@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -12,8 +13,10 @@ from typing import AsyncIterator
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
 
+from primo_mcp_server.citations import format_citation
 from primo_mcp_server.client import PrimoAPIError, PrimoClient
 from primo_mcp_server.config import PrimoConfig
+from primo_mcp_server.exporters import export_bibtex, export_csv, export_ris
 from primo_mcp_server.formatter import (
     format_record_detail,
     format_search_results,
@@ -53,6 +56,31 @@ mcp = FastMCP(
     instructions=SERVER_INSTRUCTIONS,
     lifespan=app_lifespan,
 )
+
+
+def _tool_error_boundary(action: str):
+    """Uniform error boundary for MCP tools.
+
+    Primo API failures return their caller-facing message ("Error {action}:
+    ..."); anything else is a bug, so the traceback is logged before the
+    short message goes back to the caller -- without the log, unexpected
+    errors were invisible one-liners.
+    """
+
+    def decorate(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            try:
+                return await func(*args, **kwargs)
+            except PrimoAPIError as e:
+                return f"Error {action}: {e}"
+            except Exception as e:
+                logger.exception("Unexpected error in %s", func.__name__)
+                return f"Unexpected error: {e}"
+
+        return wrapper
+
+    return decorate
 
 
 def _get_client(ctx: Context) -> PrimoClient:
@@ -167,6 +195,7 @@ def _log_recommendation_outcome(
 # ---------------------------------------------------------------------------
 
 @mcp.tool(description=PRIMO_SEARCH_DESCRIPTION)
+@_tool_error_boundary("searching Primo")
 async def primo_search(
     ctx: Context,
     query: str,
@@ -183,6 +212,8 @@ async def primo_search(
     recommend_librarians: bool = True,
     librarian_limit: int = 2,
     clauses: list[QueryClause] | None = None,
+    facet_filters: dict[str, str] | None = None,
+    facet_exclusions: dict[str, str] | None = None,
 ) -> str:
     """Search Singapore Management University Library via Primo.
 
@@ -190,60 +221,57 @@ async def primo_search(
     argument reference live in policy.PRIMO_SEARCH_DESCRIPTION, which is
     served as this tool's description.
     """
-    try:
-        client = _get_client(ctx)
-        config = _get_config(ctx)
-        response = await client.search(
-            query=query,
-            field=field,
-            scope=scope,
-            sort_by=sort_by,
-            limit=limit,
-            offset=offset,
-            resource_type=resource_type,
-            date_from=date_from,
-            date_to=date_to,
-            peer_reviewed=peer_reviewed,
-            include_unavailable=include_unavailable,
-            clauses=clauses,
-        )
-        result = format_search_results(
-            response,
+    client = _get_client(ctx)
+    config = _get_config(ctx)
+    response = await client.search(
+        query=query,
+        field=field,
+        scope=scope,
+        sort_by=sort_by,
+        limit=limit,
+        offset=offset,
+        resource_type=resource_type,
+        date_from=date_from,
+        date_to=date_to,
+        peer_reviewed=peer_reviewed,
+        include_unavailable=include_unavailable,
+        clauses=clauses,
+        facet_filters=facet_filters,
+        facet_exclusions=facet_exclusions,
+    )
+    result = format_search_results(
+        response,
+        query,
+        offset,
+        config=config,
+        field=field,
+        scope=scope,
+        sort_by=sort_by,
+        resource_type=resource_type,
+        date_from=date_from,
+        date_to=date_to,
+        peer_reviewed=peer_reviewed,
+        include_unavailable=include_unavailable,
+        clauses=clauses,
+    )
+    if (
+        recommend_librarians
+        and config.inline_librarian_recommendations
+        # Identifier lookups (DOI, ISBN, record ids) get no inline
+        # recommendation section at all rather than a "skipped" notice.
+        and not looks_like_identifier(query)
+    ):
+        result += "\n\n" + await _format_recommendations_for_records(
+            config,
             query,
-            offset,
-            config=config,
-            field=field,
-            scope=scope,
-            sort_by=sort_by,
-            resource_type=resource_type,
-            date_from=date_from,
-            date_to=date_to,
-            peer_reviewed=peer_reviewed,
-            include_unavailable=include_unavailable,
-            clauses=clauses,
+            response.records,
+            limit=librarian_limit,
+            # Inline recommendations ride on every ordinary search, so a
+            # slow embedding call gets a tighter budget than the explicit
+            # primo_recommend_librarians tool.
+            embedding_timeout=config.embedding_inline_timeout,
         )
-        if (
-            recommend_librarians
-            and config.inline_librarian_recommendations
-            # Identifier lookups (DOI, ISBN, record ids) get no inline
-            # recommendation section at all rather than a "skipped" notice.
-            and not looks_like_identifier(query)
-        ):
-            result += "\n\n" + await _format_recommendations_for_records(
-                config,
-                query,
-                response.records,
-                limit=librarian_limit,
-                # Inline recommendations ride on every ordinary search, so a
-                # slow embedding call gets a tighter budget than the explicit
-                # primo_recommend_librarians tool.
-                embedding_timeout=config.embedding_inline_timeout,
-            )
-        return result
-    except PrimoAPIError as e:
-        return f"Error searching Primo: {e}"
-    except Exception as e:
-        return f"Unexpected error: {e}"
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +279,7 @@ async def primo_search(
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
+@_tool_error_boundary("fetching record")
 async def primo_get_record(ctx: Context, record_id: str) -> str:
     """Get full details for a single library record.
 
@@ -263,21 +292,16 @@ async def primo_get_record(ctx: Context, record_id: str) -> str:
     Returns:
         Full record details including title, authors, abstract, identifiers, and availability.
     """
-    try:
-        client = _get_client(ctx)
-        config = _get_config(ctx)
-        record = await client.get_record(record_id)
-        if record is None:
-            return (
-                f'Record "{record_id}" not found. '
-                "It may have been removed, or the ID may be incorrect. "
-                "Try searching again with primo_search."
-            )
-        return format_record_detail(record, config=config)
-    except PrimoAPIError as e:
-        return f"Error fetching record: {e}"
-    except Exception as e:
-        return f"Unexpected error: {e}"
+    client = _get_client(ctx)
+    config = _get_config(ctx)
+    record = await client.get_record(record_id)
+    if record is None:
+        return (
+            f'Record "{record_id}" not found. '
+            "It may have been removed, or the ID may be incorrect. "
+            "Try searching again with primo_search."
+        )
+    return format_record_detail(record, config=config)
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +309,7 @@ async def primo_get_record(ctx: Context, record_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
+@_tool_error_boundary("getting suggestions")
 async def primo_suggest(ctx: Context, query: str) -> str:
     """Get autocomplete suggestions for a search term.
 
@@ -297,14 +322,9 @@ async def primo_suggest(ctx: Context, query: str) -> str:
     Returns:
         List of suggested search terms.
     """
-    try:
-        client = _get_client(ctx)
-        suggestions = await client.suggest(query)
-        return format_suggestions(suggestions, query)
-    except PrimoAPIError as e:
-        return f"Error getting suggestions: {e}"
-    except Exception as e:
-        return f"Unexpected error: {e}"
+    client = _get_client(ctx)
+    suggestions = await client.suggest(query)
+    return format_suggestions(suggestions, query)
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +332,7 @@ async def primo_suggest(ctx: Context, query: str) -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
+@_tool_error_boundary("recommending librarians")
 async def primo_recommend_librarians(
     ctx: Context,
     query: str,
@@ -358,41 +379,36 @@ async def primo_recommend_librarians(
         Validated librarian recommendations, configuration guidance, or a
         no-recommendation message when matches are weak.
     """
-    try:
-        client = _get_client(ctx)
-        config = _get_config(ctx)
+    client = _get_client(ctx)
+    config = _get_config(ctx)
 
-        if record_ids:
-            records = await client.get_records(record_ids)
-        else:
-            response = await client.search(
-                query=query,
-                field=field,
-                scope=scope,
-                sort_by=sort_by,
-                limit=search_limit,
-                offset=offset,
-                resource_type=resource_type,
-                date_from=date_from,
-                date_to=date_to,
-                peer_reviewed=peer_reviewed,
-                include_unavailable=include_unavailable,
-                # Records are only metadata evidence here; the facet summary
-                # would be an unused second request.
-                include_facets=False,
-            )
-            records = response.records
-
-        return await _format_recommendations_for_records(
-            config,
-            query,
-            records,
-            limit=limit,
+    if record_ids:
+        records = await client.get_records(record_ids)
+    else:
+        response = await client.search(
+            query=query,
+            field=field,
+            scope=scope,
+            sort_by=sort_by,
+            limit=search_limit,
+            offset=offset,
+            resource_type=resource_type,
+            date_from=date_from,
+            date_to=date_to,
+            peer_reviewed=peer_reviewed,
+            include_unavailable=include_unavailable,
+            # Records are only metadata evidence here; the facet summary
+            # would be an unused second request.
+            include_facets=False,
         )
-    except PrimoAPIError as e:
-        return f"Error recommending librarians: {e}"
-    except Exception as e:
-        return f"Unexpected error: {e}"
+        records = response.records
+
+    return await _format_recommendations_for_records(
+        config,
+        query,
+        records,
+        limit=limit,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +416,7 @@ async def primo_recommend_librarians(
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
+@_tool_error_boundary("listing librarians")
 async def primo_list_librarians(ctx: Context) -> str:
     """List every configured SMU librarian profile.
 
@@ -413,16 +430,13 @@ async def primo_list_librarians(ctx: Context) -> str:
         best-for areas, and a sample of subjects, or configuration guidance
         when no directory is configured.
     """
-    try:
-        config = _get_config(ctx)
-        directory, message, _ = load_librarian_directory_cached(
-            config.librarians_file
-        )
-        if message or directory is None:
-            return f"Librarian directory unavailable: {message}"
-        return format_librarian_directory(directory)
-    except Exception as e:
-        return f"Unexpected error: {e}"
+    config = _get_config(ctx)
+    directory, message, _ = load_librarian_directory_cached(
+        config.librarians_file
+    )
+    if message or directory is None:
+        return f"Librarian directory unavailable: {message}"
+    return format_librarian_directory(directory)
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +444,7 @@ async def primo_list_librarians(ctx: Context) -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
+@_tool_error_boundary("fetching records for citation")
 async def primo_cite(
     ctx: Context,
     record_ids: list[str],
@@ -444,31 +459,22 @@ async def primo_cite(
     Returns:
         Formatted citations. Note: always verify generated citations before submission.
     """
-    try:
-        from primo_mcp_server.citations import format_citation
+    valid_styles = {"apa7", "harvard", "chicago", "ieee", "vancouver"}
+    style = style.strip().lower()
+    if style not in valid_styles:
+        return f'Invalid citation style "{style}". Use one of: {", ".join(sorted(valid_styles))}'
 
-        valid_styles = {"apa7", "harvard", "chicago", "ieee", "vancouver"}
-        style = style.strip().lower()
-        if style not in valid_styles:
-            return f'Invalid citation style "{style}". Use one of: {", ".join(sorted(valid_styles))}'
+    client = _get_client(ctx)
+    records = await client.get_records(record_ids)
 
-        client = _get_client(ctx)
-        records = await client.get_records(record_ids)
+    if not records:
+        return "No records found for the provided IDs."
 
-        if not records:
-            return "No records found for the provided IDs."
+    citations = [format_citation(record, style) for record in records]
 
-        citations = []
-        for record in records:
-            citations.append(format_citation(record, style))
-
-        result = "\n\n".join(citations)
-        result += "\n\n-- Note: verify citations before submission. Automated formatting may not cover all edge cases."
-        return result
-    except PrimoAPIError as e:
-        return f"Error fetching records for citation: {e}"
-    except Exception as e:
-        return f"Unexpected error: {e}"
+    result = "\n\n".join(citations)
+    result += "\n\n-- Note: verify citations before submission. Automated formatting may not cover all edge cases."
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -476,6 +482,7 @@ async def primo_cite(
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
+@_tool_error_boundary("fetching records for export")
 async def primo_export(
     ctx: Context,
     record_ids: list[str],
@@ -490,27 +497,20 @@ async def primo_export(
     Returns:
         Formatted export data ready for import into reference managers (Zotero, Mendeley, EndNote).
     """
-    try:
-        from primo_mcp_server.exporters import export_bibtex, export_csv, export_ris
+    valid_formats = {"bibtex", "ris", "csv"}
+    format = format.strip().lower()
+    if format not in valid_formats:
+        return f'Invalid format "{format}". Use one of: {", ".join(sorted(valid_formats))}'
 
-        valid_formats = {"bibtex", "ris", "csv"}
-        format = format.strip().lower()
-        if format not in valid_formats:
-            return f'Invalid format "{format}". Use one of: {", ".join(sorted(valid_formats))}'
+    client = _get_client(ctx)
+    records = await client.get_records(record_ids)
 
-        client = _get_client(ctx)
-        records = await client.get_records(record_ids)
+    if not records:
+        return "No records found for the provided IDs."
 
-        if not records:
-            return "No records found for the provided IDs."
-
-        if format == "bibtex":
-            return export_bibtex(records)
-        elif format == "ris":
-            return export_ris(records)
-        else:
-            return export_csv(records)
-    except PrimoAPIError as e:
-        return f"Error fetching records for export: {e}"
-    except Exception as e:
-        return f"Unexpected error: {e}"
+    if format == "bibtex":
+        return export_bibtex(records)
+    elif format == "ris":
+        return export_ris(records)
+    else:
+        return export_csv(records)

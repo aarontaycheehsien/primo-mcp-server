@@ -72,9 +72,13 @@ async def _run(queries: list[str]) -> int:
             )
         else:
             print()
-        for sim, librarian in ranked:
-            marker = "ACCEPT" if librarian.id in accepted_ids else "      "
-            print(f"  {marker}  {sim:.4f}  {librarian.name} ({librarian.id})")
+        for entry in ranked:
+            marker = "ACCEPT" if entry.librarian.id in accepted_ids else "      "
+            topic = f'  best term: "{entry.best_term}"' if entry.best_term else ""
+            print(
+                f"  {marker}  {entry.similarity:.4f}  "
+                f"{entry.librarian.name} ({entry.librarian.id}){topic}"
+            )
     return 0
 
 
