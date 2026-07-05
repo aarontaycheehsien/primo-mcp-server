@@ -739,13 +739,35 @@ def test_stemmed_query_subphrase_still_matches_longer_profile_term():
 
 
 def test_stem_collapses_regular_inflections():
+    # Only equality classes matter: both sides of a match reduce alike.
     assert _stem("reviews") == _stem("review")
-    assert _stem("bibliometrics") == "bibliometric"
-    assert _stem("datasets") == "dataset"
-    assert _stem("studies") == "study"
+    assert _stem("bibliometrics") == _stem("bibliometric")
+    assert _stem("datasets") == _stem("dataset")
+    assert _stem("studies") == _stem("study")
     # Short tokens / acronyms are left intact.
     assert _stem("esg") == "esg"
     assert _stem("ink") == "ink"
+
+
+def test_stem_aligns_derivational_families():
+    """Snowball collapses whole derivational families, in both en-AU and
+    en-US spellings -- the class of miss behind real zero-match queries
+    ("anonymising" never matched a profile listing "anonymisation")."""
+    families = [
+        ("anonymising", "anonymisation", "anonymized"),
+        ("preserving", "preservation", "preserved"),
+        ("digitising", "digitisation", "digitization"),
+        ("visualising", "visualisation", "visualization"),
+        ("organising", "organisation", "organization"),
+        ("cataloguing", "catalogs", "catalogued"),
+        ("behavioural", "behavioral", "behaviours"),
+    ]
+    for family in families:
+        stems = {_stem(word) for word in family}
+        assert len(stems) == 1, f"{family} -> {stems}"
+    # The -our fold must not corrupt words that are not en-GB variants.
+    assert _stem("detour") != _stem("detor")
+    assert _stem("contour").startswith("contour")
 
 
 def test_plural_query_matches_singular_subject_via_stemming():
@@ -784,8 +806,14 @@ def test_specificity_amplifies_rare_terms_over_shared_ones():
     specificity = _term_specificity(directory)
 
     # "research" is shared by every librarian -> near-neutral weight; the
-    # term unique to one librarian is amplified above it.
-    assert specificity["altmetric"] > specificity["research"]
+    # term unique to one librarian is amplified above it. Keys are the
+    # normalised (stemmed) term forms.
+    from primo_mcp_server.librarians import _normalise_text
+
+    assert (
+        specificity[_normalise_text("altmetrics")]
+        > specificity[_normalise_text("research")]
+    )
 
 
 def test_distinctive_sparse_profile_outranks_generic_padded_profile():

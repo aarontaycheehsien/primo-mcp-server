@@ -6,9 +6,11 @@ import json
 import logging
 import math
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, NamedTuple, Sequence
 
+import snowballstemmer
 from pydantic import BaseModel, Field, ValidationError
 
 from primo_mcp_server.models import PrimoRecord
@@ -261,40 +263,81 @@ def looks_like_identifier(query: str) -> bool:
     return any(pattern.search(text) for pattern in _IDENTIFIER_PATTERNS)
 
 
+_SNOWBALL = snowballstemmer.stemmer("english")
+
+# en-GB -> en-US suffix fold applied before stemming. Snowball (like Porter)
+# only recognises the -ize derivational family, so without this fold the
+# en-AU spellings the profiles use ("anonymisation", "digitised") never align
+# with each other or with the en-US spellings CDI record metadata uses.
+# Ordered longest-first; the first matching suffix wins.
+_BRITISH_SUFFIX_FOLDS = (
+    ("isations", "izations"),
+    ("isation", "ization"),
+    ("ising", "izing"),
+    ("isers", "izers"),
+    ("ised", "ized"),
+    ("iser", "izer"),
+    ("ises", "izes"),
+    ("ise", "ize"),
+    ("ysing", "yzing"),
+    ("ysed", "yzed"),
+    ("yses", "yzes"),
+    ("yse", "yze"),
+    ("oguing", "oging"),
+    ("ogued", "oged"),
+    ("ogues", "ogs"),
+    ("ogue", "og"),
+    ("ourally", "orally"),
+    ("oural", "oral"),
+    ("ouring", "oring"),
+    ("oured", "ored"),
+    ("ours", "ors"),
+    ("our", "or"),
+)
+
+# Word stems where the -our fold would corrupt the token in any inflection:
+# "detour"/"detoured" are not en-GB spellings of "detor"/"detored". Short
+# -our words (hour, four, tour, ...) are already protected by the length
+# guard in _fold_british.
+_OUR_FOLD_EXCEPTION_STEMS = (
+    "detour",
+    "contour",
+    "velour",
+    "troubadour",
+    "paramour",
+)
+
+
+def _fold_british(token: str) -> str:
+    """Fold en-GB derivational suffixes to their en-US forms."""
+    if len(token) < 6 or token.startswith(_OUR_FOLD_EXCEPTION_STEMS):
+        return token
+    for british, american in _BRITISH_SUFFIX_FOLDS:
+        if token.endswith(british):
+            return token[: -len(british)] + american
+    return token
+
+
+@lru_cache(maxsize=65536)
 def _stem(token: str) -> str:
-    """Reduce a token to a conservative morphological stem.
+    """Reduce a token to its Snowball (Porter2) stem, en-GB folded first.
 
-    This is intentionally lightweight (no NLP dependency): it collapses the
-    regular inflections that otherwise force curators to enumerate every word
-    form in a profile -- plurals ("reviews" -> "review", "bibliometrics" ->
-    "bibliometric"), and the common verb endings -ing/-ed. It is applied
-    symmetrically to both profile terms and record/query text, so even an
-    over-aggressive stem still matches as long as both sides reduce alike.
-    Short tokens (<= 3 chars) are left untouched to avoid mangling acronyms
-    such as "INK", "RDR", or "ESG".
+    Snowball aligns whole derivational families ("anonymising" /
+    "anonymisation" / "anonymized" all reduce to "anonym"), not just the
+    plural and -ing/-ed inflections the previous hand-rolled stripper knew.
+    It is applied symmetrically to both profile terms and record/query text,
+    so even an over-aggressive stem still matches as long as both sides
+    reduce alike, and the IDF specificity map keeps collapsed stems from
+    gaining unearned weight. Short tokens (<= 3 chars) are left untouched to
+    avoid mangling acronyms such as "INK", "RDR", or "ESG"; the cache keeps
+    the heavier algorithm as cheap as the old suffix stripper in practice.
     """
-    t = token
-    if len(t) <= 3:
-        return t
-    if t.endswith("ies") and len(t) > 4:
-        return t[:-3] + "y"
-    if t.endswith(("sses", "shes", "ches", "xes", "zes")):
-        return t[:-2]
-    if t.endswith("es") and len(t) > 3:
-        t = t[:-1]
-    elif (
-        t.endswith("s")
-        and not t.endswith(("ss", "us", "is"))
-        and len(t) > 3
-    ):
-        t = t[:-1]
-    if t.endswith("ing") and len(t) > 5:
-        t = t[:-3]
-    elif t.endswith("ed") and len(t) > 4:
-        t = t[:-2]
-    return t
+    if len(token) <= 3:
+        return token
+    return _SNOWBALL.stemWord(_fold_british(token))
 
 
+@lru_cache(maxsize=4096)
 def _normalise_text(value: str) -> str:
     return " ".join(_stem(token) for token in _TOKEN_RE.findall(value.casefold()))
 
