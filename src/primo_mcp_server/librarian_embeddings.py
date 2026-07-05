@@ -85,10 +85,16 @@ class SemanticFallbackResult(NamedTuple):
 
 
 class ProfileSimilarity(NamedTuple):
-    """One profile's cosine similarity to a query (for scoring and the CLI)."""
+    """One profile's cosine similarity to a query (for scoring and the CLI).
+
+    ``best_term`` is the profile text whose vector produced the max cosine --
+    the actual evidence for the match, surfaced to callers and logs so a
+    semantic recommendation is as explainable as a keyword one.
+    """
 
     similarity: float
     librarian: LibrarianProfile
+    best_term: str = ""
 
 
 def _profile_texts(librarian: LibrarianProfile) -> list[str]:
@@ -185,15 +191,38 @@ def _cache_path(config: PrimoConfig) -> Path | None:
 _CACHE_FORMAT = 2
 
 
+class _SidecarCacheEntry(NamedTuple):
+    mtime_ns: int
+    data: dict
+
+
+# In-memory memo of the parsed sidecar file, keyed by resolved path. The
+# sidecar holds every profile-term vector (megabytes of JSON for a real
+# directory) and was previously re-read and re-parsed on EVERY semantic
+# call -- a fixed tax inside the inline search path's tight latency budget.
+# The mtime check (one stat syscall) keeps external edits and multi-process
+# writers visible, mirroring the directory cache in librarians.py.
+_sidecar_cache: dict[str, _SidecarCacheEntry] = {}
+
+
 def _read_cache(path: Path | None) -> dict:
     if path is None:
         return {}
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        return {}
+    key = str(path)
+    cached = _sidecar_cache.get(key)
+    if cached is not None and cached.mtime_ns == mtime_ns:
+        return cached.data
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     if not isinstance(data, dict) or data.get("format") != _CACHE_FORMAT:
-        return {}
+        data = {}
+    _sidecar_cache[key] = _SidecarCacheEntry(mtime_ns, data)
     return data
 
 
@@ -213,7 +242,15 @@ def _write_cache(
         path.write_text(json.dumps(data), encoding="utf-8")
     except OSError:
         # Cache is an optimisation; an unwritable path is non-fatal.
-        pass
+        return
+    # Keep the in-memory memo in step with what was just written, so the
+    # next call is served from memory instead of re-parsing our own write.
+    try:
+        _sidecar_cache[str(path)] = _SidecarCacheEntry(
+            path.stat().st_mtime_ns, data
+        )
+    except OSError:
+        _sidecar_cache.pop(str(path), None)
 
 
 async def _gemini_embed(
@@ -415,12 +452,13 @@ async def _load_or_build_profile_vectors(
     embed: Embedder,
     *,
     retries: int = 0,
-) -> dict[str, list[list[float]]]:
-    """Return one embedding per profile term, re-using a sidecar cache.
+) -> dict[str, list[tuple[str, list[float]]]]:
+    """Return (term text, embedding) pairs per profile, re-using a cache.
 
     The cache is keyed by a content hash of each term text, so a term shared
     by several profiles is embedded and stored once, and editing one term on
-    one profile re-embeds only that term.
+    one profile re-embeds only that term. Term texts stay paired with their
+    vectors so scoring can report WHICH profile topic produced a match.
     """
     path = _cache_path(config)
     cache = _read_cache(path)
@@ -464,12 +502,31 @@ async def _load_or_build_profile_vectors(
 
     return {
         lib_id: [
-            vectors_by_hash[digest]
+            (text, vectors_by_hash[digest])
             for text in texts
             if (digest := _hash(text, model_key)) in vectors_by_hash
         ]
         for lib_id, texts in texts_by_profile.items()
     }
+
+
+# Query-embedding memo (LRU). Two ordinary workflows re-embed the same
+# query within seconds: paginating search results (same query, new offset)
+# and the zero-result retry policy, which sends up to five query variants --
+# often repeating one. Keyed by everything that changes the query vector;
+# bypassed when a caller injects its own embedder (tests, experiments), so a
+# cached vector can never leak between embedding backends.
+_QUERY_CACHE_MAX = 256
+_query_vector_cache: "dict[tuple[str, str, str], list[float]]" = {}
+
+
+def _query_cache_key(config: PrimoConfig, text: str) -> tuple[str, str, str]:
+    query_prefix = (
+        config.embedding_local_query_prefix
+        if _provider(config) == "local"
+        else ""
+    )
+    return (_model_key(config), query_prefix, text)
 
 
 async def score_profiles(
@@ -488,6 +545,7 @@ async def score_profiles(
     sharp hit on one term must not be averaged away by the profile's other
     topics. A stray term causing a false positive is a curation problem --
     the profile lint tool flags candidates and ``excludes`` patches them.
+    Each similarity carries the term that produced it as evidence.
 
     ``retries`` bounds how many times an HTTP 429 is waited out (None means
     ``config.embedding_retry_attempts``); pass 0 on latency-bounded paths.
@@ -503,19 +561,36 @@ async def score_profiles(
     )
     if not any(profile_vectors.values()):
         return []
-    query_vector = (
-        await _embed_with_retry(
-            embed, [_query_text(query, None)], _TASK_QUERY, config, retries=retries
+
+    query_text = _query_text(query, None)
+    cache_key = _query_cache_key(config, query_text) if embedder is None else None
+    query_vector = _query_vector_cache.get(cache_key) if cache_key else None
+    if query_vector is None:
+        query_vector = (
+            await _embed_with_retry(
+                embed, [query_text], _TASK_QUERY, config, retries=retries
+            )
+        )[0]
+        if cache_key is not None:
+            _query_vector_cache[cache_key] = query_vector
+            while len(_query_vector_cache) > _QUERY_CACHE_MAX:
+                _query_vector_cache.pop(next(iter(_query_vector_cache)))
+    elif cache_key is not None:
+        # Re-insert on hit so eviction order stays least-recently-used
+        # (dicts preserve insertion order).
+        _query_vector_cache[cache_key] = _query_vector_cache.pop(cache_key)
+
+    results: list[ProfileSimilarity] = []
+    for librarian in directory.librarians:
+        pairs = profile_vectors.get(librarian.id)
+        if not pairs:
+            continue
+        similarity, best_term = max(
+            ((_cosine(query_vector, vector), text) for text, vector in pairs),
+            key=lambda item: item[0],
         )
-    )[0]
-    return [
-        ProfileSimilarity(
-            max(_cosine(query_vector, vector) for vector in vectors),
-            librarian,
-        )
-        for librarian in directory.librarians
-        if (vectors := profile_vectors.get(librarian.id))
-    ]
+        results.append(ProfileSimilarity(similarity, librarian, best_term))
+    return results
 
 
 def _accepted(
@@ -629,22 +704,24 @@ async def semantic_fallback(
         ]
         if rejected:
             top = max(rejected, key=lambda s: s.similarity)
-            near_miss = LibrarianMatch(
-                librarian=top.librarian,
-                score=round(top.similarity, 4),
-                matched_terms=[],
-                evidence_fields=["semantic"],
-            )
+            near_miss = _semantic_match(top)
 
     return SemanticFallbackResult(
-        [
-            LibrarianMatch(
-                librarian=librarian,
-                score=round(similarity, 4),
-                matched_terms=[],
-                evidence_fields=["semantic"],
-            )
-            for similarity, librarian in scored[:capped_limit]
-        ],
+        [_semantic_match(s) for s in scored[:capped_limit]],
         near_miss=near_miss,
+    )
+
+
+def _semantic_match(similarity: ProfileSimilarity) -> LibrarianMatch:
+    """Build a LibrarianMatch from a semantic similarity.
+
+    The best-matching profile term travels in ``matched_terms`` so output
+    and the recommendation log show WHAT the query resembled, not just how
+    much; ``evidence_fields == ["semantic"]`` remains the path marker.
+    """
+    return LibrarianMatch(
+        librarian=similarity.librarian,
+        score=round(similarity.similarity, 4),
+        matched_terms=[similarity.best_term] if similarity.best_term else [],
+        evidence_fields=["semantic"],
     )

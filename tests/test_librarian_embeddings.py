@@ -1013,3 +1013,180 @@ def test_model_key_isolates_local_space_from_gemini(tmp_path):
         tmp_path, embedding_local_document_prefix="clustering: "
     )
     assert _model_key(local) != _model_key(reprompted)
+
+
+# ---------------------------------------------------------------------------
+# Best-term evidence: a semantic match names the profile topic it matched.
+# ---------------------------------------------------------------------------
+
+
+async def test_semantic_match_carries_best_matching_term(tmp_path):
+    result = await semantic_fallback(
+        _directory(),
+        "long-term preservation of born-digital archives",
+        [],
+        _config(tmp_path),
+        embedder=_FakeEmbedder(),
+    )
+
+    assert [m.librarian.id for m in result.matches] == ["preservation"]
+    assert result.matches[0].matched_terms == ["preservation"]
+
+
+async def test_best_term_is_the_argmax_over_profile_terms(tmp_path):
+    directory = LibrarianDirectory.model_validate(
+        {
+            "librarians": [
+                {
+                    "id": "multi",
+                    "name": "Multi Librarian",
+                    "subjects": ["law", "accounting"],
+                    "keywords": ["preservation"],
+                }
+            ]
+        }
+    )
+
+    result = await semantic_fallback(
+        directory,
+        "long-term preservation strategy",
+        [],
+        _config(tmp_path),
+        embedder=_FakeEmbedder(),
+    )
+
+    assert result.matches
+    assert result.matches[0].matched_terms == ["preservation"]
+
+
+async def test_semantic_near_miss_carries_best_matching_term(tmp_path):
+    # "preservation law" overlaps two profiles equally, so the top-gap rule
+    # (three profiles is below the margin minimum) rejects both; the near
+    # miss must still say which topic came closest.
+    result = await semantic_fallback(
+        _directory(),
+        "preservation law",
+        [],
+        _config(tmp_path),
+        embedder=_FakeEmbedder(),
+    )
+
+    assert result.matches == []
+    assert result.near_miss is not None
+    assert result.near_miss.matched_terms == ["preservation"]
+
+
+# ---------------------------------------------------------------------------
+# In-memory sidecar memo: unchanged mtime serves vectors without re-reading.
+# ---------------------------------------------------------------------------
+
+
+async def test_sidecar_cache_is_memoised_in_memory(tmp_path):
+    import os
+
+    from primo_mcp_server.librarian_embeddings import score_profiles
+
+    config = _config(tmp_path)
+    embedder = _FakeEmbedder()
+    first = await score_profiles(
+        _directory(), "preservation of records", config, embedder=embedder
+    )
+    assert sum(1 for _, task in embedder.calls if task == "RETRIEVAL_DOCUMENT") == 1
+
+    # Corrupt the sidecar on disk but restore its mtime: an unchanged mtime
+    # must be served from the in-memory memo without re-reading the file, so
+    # the corruption stays invisible and nothing is re-embedded.
+    cache_path = tmp_path / "embeddings.json"
+    stat = cache_path.stat()
+    cache_path.write_text("{not json", encoding="utf-8")
+    os.utime(cache_path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+    second = await score_profiles(
+        _directory(), "preservation of records", config, embedder=embedder
+    )
+    assert sum(1 for _, task in embedder.calls if task == "RETRIEVAL_DOCUMENT") == 1
+    assert [s.librarian.id for s in second] == [s.librarian.id for s in first]
+
+
+async def test_sidecar_change_on_disk_is_picked_up(tmp_path):
+    from primo_mcp_server.librarian_embeddings import score_profiles
+
+    config = _config(tmp_path)
+    embedder = _FakeEmbedder()
+    await score_profiles(
+        _directory(), "preservation of records", config, embedder=embedder
+    )
+    assert sum(1 for _, task in embedder.calls if task == "RETRIEVAL_DOCUMENT") == 1
+
+    # A real content change (new mtime) invalidates the memo: the corrupt
+    # file is re-read, yields no usable entries, and documents re-embed.
+    (tmp_path / "embeddings.json").write_text("{not json", encoding="utf-8")
+
+    await score_profiles(
+        _directory(), "preservation of records", config, embedder=embedder
+    )
+    assert sum(1 for _, task in embedder.calls if task == "RETRIEVAL_DOCUMENT") == 2
+
+
+# ---------------------------------------------------------------------------
+# Query-embedding LRU: repeats skip the embedding call on the default path.
+# ---------------------------------------------------------------------------
+
+
+async def test_query_embedding_is_cached_for_default_embedder(tmp_path, monkeypatch):
+    from primo_mcp_server import librarian_embeddings as le
+
+    monkeypatch.setattr(le, "_query_vector_cache", {})
+    embedder = _FakeEmbedder()
+    monkeypatch.setattr(le, "_default_embedder", lambda config, timeout: embedder)
+
+    config = _config(tmp_path)
+    first = await le.score_profiles(
+        _directory(), "preservation of digital archives", config
+    )
+    second = await le.score_profiles(
+        _directory(), "preservation of digital archives", config
+    )
+
+    assert sum(1 for _, task in embedder.calls if task == "RETRIEVAL_QUERY") == 1
+    assert [(s.librarian.id, s.similarity) for s in second] == [
+        (s.librarian.id, s.similarity) for s in first
+    ]
+
+
+async def test_injected_embedder_bypasses_query_cache(tmp_path, monkeypatch):
+    from primo_mcp_server import librarian_embeddings as le
+
+    monkeypatch.setattr(le, "_query_vector_cache", {})
+    embedder = _FakeEmbedder()
+    config = _config(tmp_path)
+
+    await le.score_profiles(
+        _directory(), "preservation topics", config, embedder=embedder
+    )
+    await le.score_profiles(
+        _directory(), "preservation topics", config, embedder=embedder
+    )
+
+    # An injected embedder (tests, experiments) must neither read nor
+    # populate the cache, so vectors can never leak between backends.
+    assert sum(1 for _, task in embedder.calls if task == "RETRIEVAL_QUERY") == 2
+    assert le._query_vector_cache == {}
+
+
+async def test_query_cache_evicts_least_recently_used(tmp_path, monkeypatch):
+    from primo_mcp_server import librarian_embeddings as le
+
+    monkeypatch.setattr(le, "_query_vector_cache", {})
+    monkeypatch.setattr(le, "_QUERY_CACHE_MAX", 2)
+    embedder = _FakeEmbedder()
+    monkeypatch.setattr(le, "_default_embedder", lambda config, timeout: embedder)
+
+    config = _config(tmp_path)
+    for query in ("preservation one", "preservation two", "preservation three"):
+        await le.score_profiles(_directory(), query, config)
+
+    assert len(le._query_vector_cache) == 2
+    # The oldest query was evicted; repeating it embeds again.
+    await le.score_profiles(_directory(), "preservation one", config)
+    assert sum(1 for _, task in embedder.calls if task == "RETRIEVAL_QUERY") == 4
