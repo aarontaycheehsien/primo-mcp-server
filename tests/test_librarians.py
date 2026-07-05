@@ -1259,3 +1259,54 @@ class TestNearMisses:
         assert "Closest configured profiles" not in output
         assert "primo_list_librarians" in output
         assert "never present a librarian as recommended without showing evidence" in output
+
+
+class TestUnorderedTokenMatching:
+    def _directory(self) -> LibrarianDirectory:
+        return LibrarianDirectory.model_validate(
+            {
+                "librarians": [
+                    {
+                        "id": "preservation",
+                        "name": "Preservation Librarian",
+                        "subjects": ["digital preservation"],
+                    },
+                    {
+                        "id": "rdm",
+                        "name": "RDM Librarian",
+                        "subjects": ["research data management"],
+                    },
+                ]
+            }
+        )
+
+    def test_reworded_query_matches_multi_word_term(self):
+        matches = recommend_librarians(
+            self._directory(), "preserving born-digital records", []
+        )
+
+        assert [m.librarian.id for m in matches] == ["preservation"]
+        assert matches[0].matched_terms == ["digital preservation"]
+
+    def test_filler_tokens_in_term_are_not_required(self):
+        # "research" is a filler token, so "research data management"
+        # matches a query carrying only "data" and "management".
+        matches = recommend_librarians(
+            self._directory(), "writing a data management plan", []
+        )
+
+        assert [m.librarian.id for m in matches] == ["rdm"]
+
+    def test_single_shared_token_cannot_claim_a_phrase(self):
+        matches = recommend_librarians(self._directory(), "digital art history", [])
+
+        assert matches == []
+
+    def test_unordered_match_scores_below_exact_phrase(self):
+        exact = recommend_librarians(self._directory(), "digital preservation", [])
+        unordered = recommend_librarians(
+            self._directory(), "preservation of digital records", []
+        )
+
+        assert exact and unordered
+        assert unordered[0].score < exact[0].score

@@ -470,6 +470,33 @@ def _contains_term(text: str, term: str, *, allow_reverse: bool = False) -> bool
     return term_norm in set(text_norm.split())
 
 
+# Weight retained by a word-order-free match relative to an exact phrase
+# match. Scattered tokens are real but weaker evidence than the phrase.
+_UNORDERED_QUERY_FACTOR = 0.7
+
+
+def _contains_tokens_unordered(text: str, term: str) -> bool:
+    """True when every content token of a multi-word term appears in the text.
+
+    Exact phrase matching misses reworded queries: "digital preservation"
+    never matched "preserving born-digital records" even though both content
+    stems are present. Filler and stopword tokens in the term are not
+    required ("research data management" matches a query carrying only
+    "data" and "management", since "research" adds no routing signal), but
+    at least two content tokens must be present and found, so a single
+    shared word can never claim a multi-word phrase.
+    """
+    term_tokens = [
+        token
+        for token in _normalise_text(term).split()
+        if token not in _FILLER_TERMS and token not in _STOPWORDS
+    ]
+    if len(term_tokens) < 2:
+        return False
+    text_tokens = set(_normalise_text(text).split())
+    return all(token in text_tokens for token in term_tokens)
+
+
 def _unique(values: Iterable[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
@@ -623,10 +650,20 @@ def _score_term(
         weight = weights.get(field, 0.0)
         if weight <= 0:
             continue
-        if any(
+        matched = any(
             _contains_term(text, term, allow_reverse=field == "query")
             for text in texts
-        ):
+        )
+        if not matched and field == "query":
+            # Word-order-free fallback, query only: record metadata is too
+            # noisy for scattered-token matching, but a reworded query
+            # ("preserving ... digital records" vs "digital preservation")
+            # is still direct user intent. Dampened so an exact phrase
+            # always outranks a scattered one.
+            if any(_contains_tokens_unordered(text, term) for text in texts):
+                matched = True
+                weight *= _UNORDERED_QUERY_FACTOR
+        if matched:
             if field == "query":
                 weight *= _query_coverage_factor(term, query_content_tokens)
             score += weight
