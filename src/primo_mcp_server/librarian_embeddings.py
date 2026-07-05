@@ -279,8 +279,9 @@ async def _local_embed(
     runtime is installed. The OpenAI API has no taskType parameter, so the
     configured query/document prefixes stand in (EmbeddingGemma and nomic
     both use prompt prefixes for asymmetric retrieval). No API key is
-    required; when one is configured it is sent as a Bearer token for
-    runtimes that check.
+    required; embedding_local_api_key (deliberately separate from the
+    Gemini key, which must never travel to a non-Google endpoint) is sent
+    as a Bearer token for runtimes that check.
     """
     base = config.embedding_local_url.rstrip("/")
     url = f"{base}/embeddings"
@@ -290,8 +291,8 @@ async def _local_embed(
         else config.embedding_local_document_prefix
     )
     headers = {}
-    if config.embedding_api_key:
-        headers["Authorization"] = f"Bearer {config.embedding_api_key}"
+    if config.embedding_local_api_key:
+        headers["Authorization"] = f"Bearer {config.embedding_local_api_key}"
 
     vectors: list[list[float]] = []
     async with httpx.AsyncClient(

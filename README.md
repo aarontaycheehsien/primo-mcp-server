@@ -168,7 +168,8 @@ environment variables:
 | `PRIMO_RECOMMEND_LOG_FILE` | unset | Opt-in JSONL log of recommendation outcomes (query, status, match/near-miss ids and scores) for triaging real queries into the golden eval set |
 | `PRIMO_LIBRARIAN_SEMANTIC_FALLBACK` | `false` | Enable the embedding path used when keyword matching finds nothing or matches weakly |
 | `PRIMO_EMBEDDING_PROVIDER` | `gemini` | `gemini` for Google's hosted API, `local` for an OpenAI-compatible local endpoint (Ollama, LM Studio, llama.cpp) with no quota |
-| `PRIMO_EMBEDDING_API_KEY` | unset | Google Gemini API key (`gemini`); optional Bearer token for local runtimes that check one |
+| `PRIMO_EMBEDDING_API_KEY` | unset | Google Gemini API key for the `gemini` provider (never sent to local endpoints) |
+| `PRIMO_EMBEDDING_LOCAL_API_KEY` | unset | Optional Bearer token for `local` runtimes that check one |
 | `PRIMO_EMBEDDING_MODEL` | `gemini-embedding-001` | Embedding model for the `gemini` provider |
 | `PRIMO_EMBEDDING_API_URL` | `https://generativelanguage.googleapis.com/v1beta` | Embedding API base URL for the `gemini` provider |
 | `PRIMO_EMBEDDING_LOCAL_URL` | `http://localhost:11434/v1` | OpenAI-compatible base URL for the `local` provider (default: Ollama) |

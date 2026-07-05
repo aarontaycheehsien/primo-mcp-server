@@ -912,7 +912,8 @@ async def test_local_embed_posts_openai_shape_without_auth(tmp_path):
     vectors = await _local_embed(
         ["hello", "world"],
         "RETRIEVAL_DOCUMENT",
-        config=_local_config(tmp_path),
+        # A configured Gemini key must never leak to the local endpoint.
+        config=_local_config(tmp_path, embedding_api_key="gemini-key"),
     )
 
     assert vectors == [[0.1, 0.2], [0.4, 0.5]]
@@ -940,7 +941,12 @@ async def test_local_embed_applies_query_prefix_and_bearer_key(tmp_path):
     await _local_embed(
         ["digital preservation"],
         "RETRIEVAL_QUERY",
-        config=_local_config(tmp_path, embedding_api_key="local-key"),
+        config=_local_config(
+            tmp_path,
+            embedding_local_api_key="local-key",
+            # A configured Gemini key must NOT be the one sent locally.
+            embedding_api_key="gemini-key",
+        ),
     )
 
     request = route.calls.last.request

@@ -87,6 +87,10 @@ class PrimoConfig(BaseSettings):
     # serving runtime applies its own prompt template.
     embedding_local_url: str = "http://localhost:11434/v1"
     embedding_local_model: str = "embeddinggemma"
+    # Bearer token for local runtimes that check one. Deliberately separate
+    # from embedding_api_key so a configured Gemini key can never travel to
+    # a non-Google endpoint.
+    embedding_local_api_key: str | None = None
     embedding_local_query_prefix: str = "task: search result | query: "
     embedding_local_document_prefix: str = "title: none | text: "
     # Absolute cosine sanity floor. gemini-embedding-001 is anisotropic
