@@ -1013,3 +1013,45 @@ def test_model_key_isolates_local_space_from_gemini(tmp_path):
         tmp_path, embedding_local_document_prefix="clustering: "
     )
     assert _model_key(local) != _model_key(reprompted)
+
+
+@respx.mock
+async def test_warm_up_loads_local_model(tmp_path):
+    from primo_mcp_server.librarian_embeddings import warm_up_local_embedder
+
+    route = respx.post("http://localhost:11434/v1/embeddings").mock(
+        return_value=httpx.Response(
+            200, json={"data": [{"index": 0, "embedding": [0.1]}]}
+        )
+    )
+
+    await warm_up_local_embedder(_local_config(tmp_path))
+
+    assert route.call_count == 1
+
+
+async def test_warm_up_skips_gemini_and_disabled(tmp_path):
+    from primo_mcp_server.librarian_embeddings import warm_up_local_embedder
+
+    # No respx mock is armed: any HTTP call would raise. Neither the gemini
+    # provider nor a disabled fallback may touch the network.
+    await warm_up_local_embedder(
+        _local_config(tmp_path, embedding_provider="gemini")
+    )
+    await warm_up_local_embedder(
+        _local_config(tmp_path, librarian_semantic_fallback=False)
+    )
+
+
+@respx.mock
+async def test_warm_up_swallows_runtime_down(tmp_path, caplog):
+    from primo_mcp_server.librarian_embeddings import warm_up_local_embedder
+
+    respx.post("http://localhost:11434/v1/embeddings").mock(
+        side_effect=httpx.ConnectError("connection refused")
+    )
+
+    # Must not raise; warm-up is an optimisation only.
+    await warm_up_local_embedder(_local_config(tmp_path))
+
+    assert any("warm-up failed" in r.message for r in caplog.records)

@@ -560,3 +560,25 @@ async def test_no_log_file_is_written_without_opt_in(tmp_path):
     )
 
     assert not list(tmp_path.glob("*.jsonl"))
+
+
+async def test_lifespan_fires_local_embedding_warmup(monkeypatch):
+    import asyncio
+
+    from primo_mcp_server.server import app_lifespan, mcp
+
+    calls: list = []
+
+    async def fake_warmup(config):
+        calls.append(config)
+
+    monkeypatch.setattr(
+        "primo_mcp_server.server.warm_up_local_embedder", fake_warmup
+    )
+
+    async with app_lifespan(mcp) as context:
+        # Yield control so the background task runs.
+        await asyncio.sleep(0)
+        assert "client" in context and "config" in context
+
+    assert len(calls) == 1

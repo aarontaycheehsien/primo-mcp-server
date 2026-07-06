@@ -18,3 +18,5 @@ librarian-profile.json
 librarian-profile.csv
 # Local golden-query benchmark labelled with real profile ids
 librarian-eval.json
+# Opt-in recommendation outcome log (contains real user queries)
+recommend-outcomes.jsonl

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
@@ -14,6 +15,7 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from primo_mcp_server.client import PrimoAPIError, PrimoClient
 from primo_mcp_server.config import PrimoConfig
+from primo_mcp_server.librarian_embeddings import warm_up_local_embedder
 from primo_mcp_server.formatter import (
     format_record_detail,
     format_search_results,
@@ -37,15 +39,25 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[dict]:
-    """Create a shared httpx client for the server lifetime."""
+    """Create a shared httpx client for the server lifetime.
+
+    When the semantic fallback runs against a local embedding runtime, a
+    background warm-up loads the model at startup so the first search does
+    not pay the multi-second model load inside its tight inline budget.
+    """
     config = PrimoConfig()
-    async with httpx.AsyncClient(
-        base_url=config.base_url,
-        timeout=config.request_timeout,
-        headers={"User-Agent": config.user_agent},
-    ) as http_client:
-        client = PrimoClient(http_client, config)
-        yield {"client": client, "config": config}
+    warmup = asyncio.create_task(warm_up_local_embedder(config))
+    try:
+        async with httpx.AsyncClient(
+            base_url=config.base_url,
+            timeout=config.request_timeout,
+            headers={"User-Agent": config.user_agent},
+        ) as http_client:
+            client = PrimoClient(http_client, config)
+            yield {"client": client, "config": config}
+    finally:
+        if not warmup.done():
+            warmup.cancel()
 
 
 mcp = FastMCP(

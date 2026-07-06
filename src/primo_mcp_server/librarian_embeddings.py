@@ -320,6 +320,31 @@ def _provider(config: PrimoConfig) -> str:
     return config.embedding_provider.strip().lower()
 
 
+async def warm_up_local_embedder(config: PrimoConfig) -> None:
+    """Load the local embedding model into the runtime's memory.
+
+    Local runtimes lazy-load models and may evict them after idle (Ollama
+    defaults to five minutes), so the first semantic call after a quiet
+    period pays a multi-second model load -- measured at ~5.7s for
+    EmbeddingGemma, which blows the 2.5s inline primo_search budget and
+    degrades every such search to keyword-only. One throwaway embedding at
+    server startup absorbs that cost off the request path. Fail-silent:
+    warm-up is an optimisation, and the per-request fail-closed handling
+    already covers a runtime that is down.
+    """
+    if not config.librarian_semantic_fallback or _provider(config) != "local":
+        return
+    try:
+        await _local_embed(
+            ["warm up"], _TASK_QUERY, config=config, timeout=60.0
+        )
+        logger.info("Local embedding model warmed up")
+    except Exception as e:
+        logger.warning(
+            "Local embedding warm-up failed (%s): %s", type(e).__name__, e
+        )
+
+
 def _default_embedder(
     config: PrimoConfig, timeout: float | None
 ) -> Embedder:
