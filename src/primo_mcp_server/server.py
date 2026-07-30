@@ -15,6 +15,13 @@ from primo_mcp_server.formatter import (
     format_search_results,
     format_suggestions,
 )
+from primo_mcp_server.librarians import (
+    format_librarian_directory,
+    format_librarian_recommendations,
+    load_librarian_directory_cached,
+    looks_like_identifier,
+)
+from primo_mcp_server.recommendation import recommend_with_fallback
 
 
 @asynccontextmanager
@@ -41,14 +48,44 @@ mcp = FastMCP(
         "results and the user did not ask for catalogue-only results, retry "
         "with scope='everything' and say that you widened the search. "
         "For books, databases, and videos, default to scope='catalogue'. "
-        "For articles, default to scope='everything'. For confirmation "
+        "For articles, default to scope='everything'. For dataset or "
+        "data-source requests, start with scope='catalogue' and "
+        "resource_type='databases' to find subscribed data platforms first; "
+        "only expand to articles or books after the database pass is weak, "
+        "irrelevant, or empty, and say that you expanded beyond databases. "
+        "For confirmation "
         "requests about whether the library has, owns, subscribes to, or "
         "provides access to a title, use Primo as the evidence source and "
         "do not use websites, LibGuides, or general web pages unless the "
-        "user explicitly asks for web confirmation. "
+        "user explicitly asks for web confirmation. Iterative search "
+        "recovery policy: treat a search as final as soon as it returns "
+        "results relevant to the user's request. If results are absent or "
+        "clearly irrelevant, make at most six primo_search calls in total, "
+        "stopping early when relevant results appear. Search the original "
+        "query first; then, where applicable, widen catalogue to everything, "
+        "call primo_suggest and try a plausible suggestion, try one "
+        "high-confidence spelling correction, simplify the query while "
+        "removing only agent-inferred filters, and try one close synonym or "
+        "related-term variant. Skip inapplicable steps. Disclose corrections "
+        "and summarise attempted queries, scope changes, and the final "
+        "outcome. Preserve all explicit user constraints. For holdings, "
+        "ownership, subscription, or access confirmation, do not use "
+        "synonyms or related items as evidence for the requested title, and "
+        "identify results found through a corrected title. Set "
+        "recommend_librarians=false on every primo_search call in this "
+        "workflow, including the final search attempt. After the final "
+        "search, call primo_recommend_librarians exactly once, passing final "
+        "relevant record IDs when available or the best corrected or "
+        "clarified query otherwise. "
         "Use primo_search for queries, primo_get_record for full details, "
-        "primo_suggest for autocomplete, primo_cite for citations, "
-        "and primo_export for BibTeX/RIS/CSV export."
+        "primo_suggest for autocomplete, primo_recommend_librarians for "
+        "validated librarian recommendations, primo_list_librarians for "
+        "the full configured librarian directory, primo_cite for "
+        "citations, and primo_export for BibTeX/RIS/CSV export. Librarian "
+        "recommendations are limited to configured profile IDs; do not "
+        "invent or substitute names. Whenever recommending a librarian, "
+        "always include the server-provided Reasoning for that librarian; "
+        "never present a librarian recommendation without its reason."
     ),
     lifespan=app_lifespan,
 )
@@ -62,6 +99,60 @@ def _get_client(ctx: Context) -> PrimoClient:
 def _get_config(ctx: Context) -> PrimoConfig:
     """Extract the PrimoConfig from the lifespan context."""
     return ctx.request_context.lifespan_context["config"]
+
+
+async def _format_recommendations_for_records(
+    config: PrimoConfig,
+    query: str,
+    records,
+    *,
+    limit: int = 2,
+    embedding_timeout: float | None = None,
+) -> str:
+    """Load configured profiles and format validated recommendations.
+
+    The ranking itself lives in ``recommendation.recommend_with_fallback``
+    (shared with the offline evaluation harness); this helper adds the
+    identifier skip, directory loading, and MCP-facing formatting.
+
+    Identifier-shaped queries (DOI, ISBN, ISSN, record ids) skip both paths:
+    embedding a DOI produces noise and keyword-matching one is meaningless.
+    """
+    if looks_like_identifier(query):
+        return format_librarian_recommendations(
+            [],
+            query,
+            skip_reason=(
+                "The query looks like a record identifier (DOI, ISBN, ISSN, "
+                "or record ID), so librarian recommendations were skipped."
+            ),
+        )
+
+    directory, message, specificity = load_librarian_directory_cached(
+        config.librarians_file
+    )
+    if message or directory is None:
+        return format_librarian_recommendations(
+            [],
+            query,
+            configuration_message=message,
+        )
+
+    outcome = await recommend_with_fallback(
+        directory,
+        query,
+        records,
+        config,
+        limit=limit,
+        specificity=specificity,
+        embedding_timeout=embedding_timeout,
+    )
+    return format_librarian_recommendations(
+        outcome.matches,
+        query,
+        semantic_error=outcome.semantic_error,
+        semantic_skipped=outcome.semantic_skipped,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +173,8 @@ async def primo_search(
     date_to: str | None = None,
     peer_reviewed: bool | None = None,
     include_unavailable: bool | None = None,
+    recommend_librarians: bool = True,
+    librarian_limit: int = 2,
 ) -> str:
     """Search Singapore Management University Library via Primo.
 
@@ -92,14 +185,34 @@ async def primo_search(
       widened.
     - For books, databases, and videos, default to scope="catalogue".
     - For articles, default to scope="everything".
+    - For dataset or data-source requests, first search subscribed databases
+      with scope="catalogue" and resource_type="databases". Only after
+      database results are weak, irrelevant, or empty should callers expand
+      to articles or books, and they should state that expansion.
     - For confirmation requests about whether the library has, owns,
       subscribes to, or provides access to a title, use Primo as the
       evidence source. Do not rely on websites, LibGuides, or general web
       pages unless the user explicitly asks for web confirmation.
+    - Treat a search as final as soon as it returns relevant results. For no
+      results or clearly irrelevant results, make at most six primo_search
+      calls in total and stop early when relevant results appear. In order
+      where applicable: search the original query; widen catalogue to
+      everything; call primo_suggest and try a plausible suggestion; try one
+      high-confidence spelling correction; simplify the query by removing
+      only agent-inferred filters; then try one close synonym or related-term
+      variant. Skip inapplicable steps.
+    - Preserve explicit user constraints and disclose corrections. For
+      holdings or access confirmation, do not use synonyms or related items
+      as evidence for the requested title.
+    - Set recommend_librarians=false on every search attempt, including the
+      final one. After the final search, call primo_recommend_librarians
+      exactly once, using final relevant record IDs when available or the
+      best corrected or clarified query otherwise. Summarise all attempted
+      queries, scope changes, corrections, and the final outcome.
 
     Args:
         query: Search terms (e.g. "machine learning entrepreneurship").
-        field: Search field -- "any" (default), "title", "creator", "sub" (subject), "isbn", "oclcnum".
+        field: Search field -- "any" (default), "title", "creator", "sub" (subject), "isbn", "issn", "oclcnum".
         scope: "everything" for local catalogue + subscribed databases, "catalogue" for local only, "books_videos" for the books/videos scope.
         sort_by: "rank" (relevance, default), "date" (newest first), "title" (alphabetical).
         limit: Number of results to return (1-50, default 10).
@@ -115,9 +228,19 @@ async def primo_search(
             confirmation requires. Only set true when the user explicitly
             wants to discover material beyond the library's collection,
             e.g. for interlibrary loan or comprehensive literature mapping.
+        recommend_librarians: Set to false to suppress inline librarian
+            recommendations for this search. Inline recommendations also
+            require PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS=true. The iterative
+            recovery workflow sets this to false on every search attempt and
+            calls primo_recommend_librarians once after the final search.
+            When shown, callers should include the bottom
+            "Recommended librarian help:" section when summarising results.
+        librarian_limit: Number of librarian recommendations to include
+            inline. Defaults to 2 and is capped at 3.
 
     Returns:
-        Formatted search results with title, authors, year, identifiers, and availability.
+        Formatted search results with title, authors, year, identifiers,
+        availability, and any bottom "Recommended librarian help:" section.
     """
     try:
         client = _get_client(ctx)
@@ -135,7 +258,7 @@ async def primo_search(
             peer_reviewed=peer_reviewed,
             include_unavailable=include_unavailable,
         )
-        return format_search_results(
+        result = format_search_results(
             response,
             query,
             offset,
@@ -149,6 +272,24 @@ async def primo_search(
             peer_reviewed=peer_reviewed,
             include_unavailable=include_unavailable,
         )
+        if (
+            recommend_librarians
+            and config.inline_librarian_recommendations
+            # Identifier lookups (DOI, ISBN, record ids) get no inline
+            # recommendation section at all rather than a "skipped" notice.
+            and not looks_like_identifier(query)
+        ):
+            result += "\n\n" + await _format_recommendations_for_records(
+                config,
+                query,
+                response.records,
+                limit=librarian_limit,
+                # Inline recommendations ride on every ordinary search, so a
+                # slow embedding call gets a tighter budget than the explicit
+                # primo_recommend_librarians tool.
+                embedding_timeout=config.embedding_inline_timeout,
+            )
+        return result
     except PrimoAPIError as e:
         return f"Error searching Primo: {e}"
     except Exception as e:
@@ -217,7 +358,125 @@ async def primo_suggest(ctx: Context, query: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool 4: primo_cite
+# Tool 4: primo_recommend_librarians
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def primo_recommend_librarians(
+    ctx: Context,
+    query: str,
+    record_ids: list[str] | None = None,
+    field: str = "any",
+    scope: str = "everything",
+    sort_by: str = "rank",
+    offset: int = 0,
+    search_limit: int = 5,
+    resource_type: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    peer_reviewed: bool | None = None,
+    include_unavailable: bool | None = None,
+    limit: int = 2,
+) -> str:
+    """Recommend configured SMU librarian help for a Primo query or records.
+
+    Recommendations are validated against the configured JSON profile
+    directory. The server returns only configured librarian names; callers
+    must not invent or substitute librarian recommendations. Callers should
+    include the complete "Recommended librarian help:" section when summarising
+    results, including the server-provided Reasoning for every recommended
+    librarian. Never present a librarian recommendation without its reason.
+
+    Args:
+        query: User research topic or Primo search query.
+        record_ids: Optional Primo record IDs to use as metadata evidence.
+            When omitted, a small Primo search is run for context.
+        field: Search field used when record_ids are omitted.
+        scope: Search scope used when record_ids are omitted.
+        sort_by: Sort order used when record_ids are omitted.
+        offset: Search offset used when record_ids are omitted.
+        search_limit: Number of Primo records to inspect when searching.
+            Defaults to 5 and is capped by the Primo client.
+        resource_type: Optional Primo resource type filter.
+        date_from: Optional start year filter in YYYY format.
+        date_to: Optional end year filter in YYYY format.
+        peer_reviewed: Set to true to inspect only peer-reviewed items.
+        include_unavailable: Set to true to include CDI records without full
+            text access when searching for context.
+        limit: Number of recommendations to return. Defaults to 2 and is
+            capped at 3.
+
+    Returns:
+        Validated librarian recommendations with supporting evidence and
+        selection reasoning, configuration guidance, or a no-recommendation
+        message when matches are weak.
+    """
+    try:
+        client = _get_client(ctx)
+        config = _get_config(ctx)
+
+        if record_ids:
+            records = await client.get_records(record_ids)
+        else:
+            response = await client.search(
+                query=query,
+                field=field,
+                scope=scope,
+                sort_by=sort_by,
+                limit=search_limit,
+                offset=offset,
+                resource_type=resource_type,
+                date_from=date_from,
+                date_to=date_to,
+                peer_reviewed=peer_reviewed,
+                include_unavailable=include_unavailable,
+            )
+            records = response.records
+
+        return await _format_recommendations_for_records(
+            config,
+            query,
+            records,
+            limit=limit,
+        )
+    except PrimoAPIError as e:
+        return f"Error recommending librarians: {e}"
+    except Exception as e:
+        return f"Unexpected error: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Tool 5: primo_list_librarians
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def primo_list_librarians(ctx: Context) -> str:
+    """List every configured SMU librarian profile.
+
+    Use this when librarian recommendation returns no match but the user
+    still wants a contact, or when the user asks who the librarians are and
+    what they cover. The list is the complete configured directory: only
+    these names may be presented; never invent or substitute names.
+
+    Returns:
+        All configured librarian profiles with title, contact, schools,
+        best-for areas, and a sample of subjects, or configuration guidance
+        when no directory is configured.
+    """
+    try:
+        config = _get_config(ctx)
+        directory, message, _ = load_librarian_directory_cached(
+            config.librarians_file
+        )
+        if message or directory is None:
+            return f"Librarian directory unavailable: {message}"
+        return format_librarian_directory(directory)
+    except Exception as e:
+        return f"Unexpected error: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Tool 6: primo_cite
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
@@ -263,7 +522,7 @@ async def primo_cite(
 
 
 # ---------------------------------------------------------------------------
-# Tool 5: primo_export
+# Tool 7: primo_export
 # ---------------------------------------------------------------------------
 
 @mcp.tool()

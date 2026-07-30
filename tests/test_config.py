@@ -17,10 +17,13 @@ def test_default_config_is_smu(monkeypatch):
         "PRIMO_SCOPE_COMBINED",
         "PRIMO_SCOPE_LOCAL",
         "PRIMO_SCOPE_BOOKS_VIDEOS",
+        "PRIMO_LIBRARIANS_FILE",
+        "PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS",
+        "PRIMO_LIBRARIAN_MIN_SCORE",
     ):
         monkeypatch.delenv(key, raising=False)
 
-    config = PrimoConfig()
+    config = PrimoConfig(_env_file=None)
 
     assert config.base_url == "https://search.library.smu.edu.sg/primaws/rest/pub"
     assert config.discovery_base_url is None
@@ -32,3 +35,6 @@ def test_default_config_is_smu(monkeypatch):
     assert config.scope_local == "MyInstitution"
     assert config.scope_combined == "MyInst_and_CI"
     assert config.scope_books_videos == "BooksVideos"
+    assert config.librarians_file is None
+    assert config.inline_librarian_recommendations is True
+    assert config.librarian_min_score == 5.0

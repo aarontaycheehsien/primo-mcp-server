@@ -37,6 +37,8 @@ dev = [
 
 [project.scripts]
 primo-mcp-server = "primo_mcp_server:main"
+primo-profiles = "primo_mcp_server.profile_tools:main"
+primo-eval = "primo_mcp_server.evaluate_recommendations:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/primo_mcp_server"]

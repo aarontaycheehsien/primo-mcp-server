@@ -1,0 +1,120 @@
+{
+  "librarians": [
+    {
+      "id": "accounting-business",
+      "name": "Alex Example",
+      "title": "Business and Accounting Librarian",
+      "email": "alex.example@example.edu",
+      "url": "https://example.edu/library/staff/alex-example",
+      "subjects": [
+        "accounting",
+        "auditing",
+        "corporate governance"
+      ],
+      "keywords": [
+        "audit fees",
+        "financial reporting",
+        "company financials"
+      ],
+      "aliases": [
+        "accountancy",
+        "business research"
+      ],
+      "best_for": [
+        "accounting datasets",
+        "annual reports",
+        "financial databases"
+      ],
+      "schools": [
+        "School of Business",
+        "School of Accountancy"
+      ],
+      "resource_types": [
+        "databases",
+        "datasets"
+      ],
+      "excludes": [
+        "legal citation"
+      ],
+      "notes": "Fictional demonstration profile for accounting and business research."
+    },
+    {
+      "id": "data-digital-scholarship",
+      "name": "Morgan Example",
+      "title": "Data and Digital Scholarship Librarian",
+      "email": "morgan.example@example.edu",
+      "url": "https://example.edu/library/staff/morgan-example",
+      "subjects": [
+        "research data management",
+        "digital humanities",
+        "bibliometrics"
+      ],
+      "keywords": [
+        "data management plan",
+        "text and data mining",
+        "research impact"
+      ],
+      "aliases": [
+        "digital scholarship",
+        "scholarly communications"
+      ],
+      "best_for": [
+        "data management plans",
+        "bibliometric analysis",
+        "text mining projects"
+      ],
+      "schools": [
+        "Graduate School",
+        "School of Computing"
+      ],
+      "resource_types": [
+        "datasets",
+        "software",
+        "articles"
+      ],
+      "excludes": [
+        "personal data recovery"
+      ],
+      "notes": "Fictional demonstration profile for data-intensive and digital research."
+    },
+    {
+      "id": "law-public-policy",
+      "name": "Taylor Example",
+      "title": "Law and Public Policy Librarian",
+      "email": "taylor.example@example.edu",
+      "url": "https://example.edu/library/staff/taylor-example",
+      "subjects": [
+        "law",
+        "public policy",
+        "legal research"
+      ],
+      "keywords": [
+        "case law",
+        "legislation",
+        "regulatory policy"
+      ],
+      "aliases": [
+        "legal information",
+        "government information"
+      ],
+      "best_for": [
+        "legal database searching",
+        "case and statute research",
+        "policy literature"
+      ],
+      "schools": [
+        "School of Law",
+        "School of Social Sciences"
+      ],
+      "resource_types": [
+        "databases",
+        "books",
+        "articles"
+      ],
+      "excludes": [
+        "personal legal advice"
+      ],
+      "notes": "Fictional demonstration profile for law and public policy research."
+    }
+  ]
+}

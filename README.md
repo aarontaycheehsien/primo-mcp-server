@@ -16,6 +16,7 @@ and Unicode-safe handling for Chinese records.
 - Generate citations in APA 7th, Harvard, Chicago, IEEE, and Vancouver styles
 - Export records to BibTeX, RIS, or UTF-8-sig CSV
 - Reject invalid search scopes instead of silently falling back to Everything
+- Recommend configured SMU librarians from search queries and Primo metadata
 
 ## Quick Start for SMU
 
@@ -57,6 +58,8 @@ pytest tests/ -v
 | `primo_search` | Search Primo with field, scope, type, date, and peer-review filters |
 | `primo_get_record` | Get full details for a record by Primo record ID |
 | `primo_suggest` | Get autocomplete suggestions |
+| `primo_recommend_librarians` | Recommend configured librarian help for a query or selected records |
+| `primo_list_librarians` | List every configured librarian profile with contact and coverage |
 | `primo_cite` | Generate formatted citations |
 | `primo_export` | Export records as BibTeX, RIS, or CSV |
 
@@ -74,7 +77,10 @@ Recommended caller policy:
 
 - For books, databases, and videos, start with `scope="catalogue"`.
 - For articles, start with `scope="everything"`.
+- For dataset or data-source requests, start with `scope="catalogue"` and `resource_type="databases"` to find subscribed data platforms first. Expand to articles or books only after database results are weak, irrelevant, or empty, and say that the search was expanded beyond databases.
 - For catalogue searches with no results, retry with `scope="everything"` only when the user did not ask for catalogue-only results.
+- For any zero-result search, reason about why the query failed and try revised `primo_search` calls up to five total attempts. Good retries may broaden an over-specific phrase, use synonyms or related concepts, try singular/plural variants, switch fields, relax filters, widen scope when permitted, search directly for likely database names, or use OR queries for close alternatives.
+- When summarising an iterative search, combine all relevant results found across attempts and report the attempted queries.
 - For access or subscription checks, use Primo results as the evidence source rather than websites or LibGuides.
 
 ## SMU Configuration
@@ -100,6 +106,9 @@ PRIMO_LANGUAGE=en
 PRIMO_REQUEST_TIMEOUT=30.0
 PRIMO_MAX_RESULTS_PER_REQUEST=50
 PRIMO_DEFAULT_RESULTS=10
+PRIMO_LIBRARIANS_FILE=C:\path\to\librarian-profile.json
+PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS=true
+PRIMO_LIBRARIAN_MIN_SCORE=5.0
 ```
 
 ## Configuration Reference
@@ -125,8 +134,193 @@ environment variables:
 | `PRIMO_DEFAULT_RESULTS` | `10` | Default results per search |
 | `PRIMO_LANGUAGE` | `en` | Primo language parameter |
 | `PRIMO_INCLUDE_UNAVAILABLE` | `false` | Include CDI records without full text access in search results |
+| `PRIMO_LIBRARIANS_FILE` | unset | External JSON librarian directory used for recommendations |
+| `PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS` | `true` | Append a bottom `Recommended librarian help:` section to `primo_search` output |
+| `PRIMO_LIBRARIAN_MIN_SCORE` | `5.0` | Minimum deterministic match score required before showing a recommendation |
+| `PRIMO_LIBRARIAN_SEMANTIC_FALLBACK` | `false` | Enable the embedding path used when keyword matching finds nothing or matches weakly |
+| `PRIMO_EMBEDDING_API_KEY` | unset | Google Gemini API key for the semantic fallback |
+| `PRIMO_EMBEDDING_MODEL` | `gemini-embedding-001` | Embedding model for the semantic fallback |
+| `PRIMO_EMBEDDING_API_URL` | `https://generativelanguage.googleapis.com/v1beta` | Embedding API base URL |
+| `PRIMO_LIBRARIAN_SEMANTIC_MIN_SIMILARITY` | `0.60` | Absolute cosine floor for a semantic recommendation |
+| `PRIMO_LIBRARIAN_SEMANTIC_MARGIN` | `0.08` | Self-calibrating margin: a match must exceed the mean similarity across all profiles by this much |
+| `PRIMO_LIBRARIAN_SEMANTIC_MARGIN_MIN_PROFILES` | `4` | Directory size at which the margin rule starts applying |
+| `PRIMO_LIBRARIAN_SEMANTIC_MIN_TOP_GAP` | `0.05` | Below the margin's profile minimum, the top match must lead the runner-up by this cosine gap (top-1 only) |
+| `PRIMO_LIBRARIAN_SEMANTIC_MIN_QUERY_TOKENS` | `2` | Skip the semantic fallback (no embedding call) for queries with fewer topical words; `1` disables the gate |
+| `PRIMO_LIBRARIAN_SEMANTIC_SECOND_GUESS_SCORE` | `12.0` | Keyword scores below this are second-guessed by the semantic path (`0` = strict miss-only cascade) |
+| `PRIMO_EMBEDDING_DIMENSIONS` | unset | Optional Matryoshka truncation (e.g. `768`) to cut cache size and latency |
+| `PRIMO_EMBEDDING_CACHE_FILE` | next to `PRIMO_LIBRARIANS_FILE` | Where profile embeddings are cached |
+| `PRIMO_EMBEDDING_TIMEOUT` | `10.0` | HTTP timeout for embedding requests in seconds |
+| `PRIMO_EMBEDDING_INLINE_TIMEOUT` | `2.5` | Tighter embedding budget for inline `primo_search` recommendations |
+| `PRIMO_EMBEDDING_RETRY_ATTEMPTS` | `3` | How many times an HTTP 429 is waited out and retried (never on the inline path) |
+| `PRIMO_EMBEDDING_RETRY_MAX_DELAY` | `65.0` | Cap in seconds on the wait honoured from the server's `Retry-After`/`RetryInfo` advice |
 
 See `.env.example` for a commented template.
+
+### Semantic fallback (optional)
+
+Keyword matching is exact (after light stemming), so a query whose wording
+doesn't overlap any profile term returns no recommendation. Enabling
+`PRIMO_LIBRARIAN_SEMANTIC_FALLBACK=true` adds an embedding-based path that runs
+when keyword matching **finds nothing or matches only weakly** (best score
+below `PRIMO_LIBRARIAN_SEMANTIC_SECOND_GUESS_SCORE`), so embeddings are
+computed only when keywords are unconvincing. Keyword matches stay primary and
+are never displaced; a passing semantic candidate for a different librarian is
+appended within the limit. It uses Google's `gemini-embedding-001` (free tier —
+get a key at <https://aistudio.google.com/apikey>). Each profile term is
+embedded as its own vector and a profile scores by its best term (max cosine),
+so a sharp hit on one configured topic is never averaged away by the rest of a
+large profile. Terms are embedded in batched `batchEmbedContents` requests,
+cached to a sidecar file keyed by term content (terms shared by several
+profiles are embedded once), and recomputed only when a term, the model, or
+the output dimensionality changes. The cache is written after every batch,
+so a rate-limited cold rebuild keeps its progress; rate-limit responses
+(HTTP 429) are waited out and retried, honouring the API's own
+`Retry-After`/`RetryInfo` advice, except on the latency-bounded inline
+`primo_search` path, which fails closed fast instead of sleeping.
+
+Acceptance is self-calibrating rather than a single tuned constant, with
+three regimes by directory size: with at least
+`PRIMO_LIBRARIAN_SEMANTIC_MARGIN_MIN_PROFILES` profiles the top matches must
+exceed the mean similarity across all profiles by
+`PRIMO_LIBRARIAN_SEMANTIC_MARGIN`; smaller directories accept only the top
+profile and only when it leads the runner-up by
+`PRIMO_LIBRARIAN_SEMANTIC_MIN_TOP_GAP`; a single-profile directory falls back
+to the absolute cosine floor alone. Queries with fewer than
+`PRIMO_LIBRARIAN_SEMANTIC_MIN_QUERY_TOKENS` topical words (stopwords and
+filler words don't count) skip the semantic path entirely -- short or vague
+queries are where cosine similarity is least reliable, and the skip happens
+before any embedding call is made. Skips are reported in the output the same
+way errors are, so they are never mistaken for a genuine no-match. To set the
+floor, margin, and gap empirically for your own directory, print the
+similarity distribution for representative test queries:
+
+```bash
+python -m primo_mcp_server.calibrate_embeddings "systematic review screening" "GIS data for urban planning"
+```
+
+The layer fails closed — only configured profiles are ever returned, and any
+embedding error degrades to the keyword outcome — but not silently: errors are
+logged to stderr and surfaced in the output as a
+`semantic fallback errored` note so an invalid API key is distinguishable from
+a genuine no-match. Semantic matches are labelled
+`Status: matched (semantic fallback)` and report their cosine similarity so
+callers can reason about confidence. Identifier-shaped queries (DOIs, ISBNs,
+ISSNs, Alma/CDI record ids) skip librarian recommendations entirely on both
+paths.
+
+### Iterative no-result recovery
+
+The agent workflow stops after the first relevant result set. When results are
+absent or clearly irrelevant, it makes at most six `primo_search` calls:
+original query, permitted catalogue-to-Everything widening, a plausible
+`primo_suggest` result, one high-confidence spelling correction, a simplified
+query with only agent-inferred filters removed, and one close synonym or
+related-term variant. Inapplicable steps are skipped.
+
+Explicit user constraints are never silently relaxed. Synonyms and related
+items are not evidence for holdings, subscription, or access confirmation, and
+corrected-title matches are disclosed. Every search attempt uses
+`recommend_librarians=false`; after the final attempt the agent calls
+`primo_recommend_librarians` once and reports the attempted queries, scope
+changes, corrections, and final outcome.
+
+When `PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS=true` and a configured profile
+meets the score threshold, `primo_search` appends a bottom Markdown section
+headed `## Recommended librarian help:`. Callers should preserve this section when
+summarising Primo results.
+
+The recommendation display uses a required fixed labelled format for every
+matched profile. Both `Evidence` and `Reasoning` are mandatory and are emitted
+by the same shared renderer for inline search recommendations and the explicit
+`primo_recommend_librarians` tool:
+
+```text
+## Recommended librarian help:
+
+Status: matched
+1. Name: [Accounting Librarian](https://library.smu.edu.sg/example-profile)
+   Title: Business Research Librarian
+   Contact: accounting@example.edu
+   Best for: Consult for accounting datasets, WRDS, and Compustat.
+   Evidence: matched terms: accounting; evidence fields: query
+   Reasoning: Selected because the matched expertise terms are configured in this librarian's subject areas and appear in the user's query. This direct overlap met the recommendation confidence threshold.
+Recommendations are limited to configured librarian profiles; do not invent or substitute names.
+```
+
+The `Name` value is always emitted as a Markdown link. The profile `url` is
+used first; if it is missing, the formatter falls back to a `mailto:` link
+when an email address is configured. `Evidence` reports the exact configured
+terms and Primo fields that contributed to the match. `Reasoning` explains
+how that overlap justified the selection. Semantic fallback matches instead
+explain that the query passed semantic confidence checks despite having no
+exact keyword match. The formatter fails closed if either required explanation
+value is empty, preventing an unsupported recommendation from being emitted.
+
+When no recommendation clears the confidence threshold, `primo_list_librarians`
+returns the complete configured directory (name, title, contact, schools,
+best-for areas, and a sample of subjects) so a caller can still route the user
+to a real contact without inventing one.
+
+Librarian recommendations require an external JSON file. The repository
+includes `librarian-profile.example.json` with three entirely fictional
+profiles, `example.edu` contacts, and every supported profile field. It is safe
+to inspect and run as a demonstration.
+
+Create a private working copy before adding real institutional contacts:
+
+```powershell
+Copy-Item librarian-profile.example.json librarian-profile.json
+```
+
+```bash
+cp librarian-profile.example.json librarian-profile.json
+```
+
+Then set `PRIMO_LIBRARIANS_FILE` to the copied file. The runtime
+`librarian-profile.json` is intentionally ignored by Git. Never force-add or
+commit it because it may contain staff names, email addresses, and other
+personal data.
+
+### Maintaining the profile directory
+
+The `primo-profiles` CLI keeps the JSON directory reproducible from a CSV
+source and reports curation problems that weaken matching:
+
+```bash
+# Build the JSON directory from a CSV source (semicolon- or comma-separated
+# multi-value cells; accepts singular or plural column headers)
+python -m primo_mcp_server.profile_tools convert librarian-profile.csv librarian-profile.json
+
+# Check the configured directory (or an explicit path) for problems:
+# filler-only terms, term variants that normalise identically, terms listed
+# by nearly every profile, unmatchable profiles, missing contact details,
+# and deny-list terms broad enough to always fire
+python -m primo_mcp_server.profile_tools lint
+```
+
+`lint` exits 0 when clean, 1 with findings, and 2 when the directory cannot
+be read, so it can gate a profile-update workflow.
+
+### Measuring recommendation accuracy
+
+The `primo-eval` CLI benchmarks the recommendation pipeline against a golden
+set of labelled queries, so tuning changes to weights, thresholds, or the
+semantic path are judged by a measured delta instead of anecdote:
+
+```bash
+python -m primo_mcp_server.evaluate_recommendations librarian-eval.json --keyword-only
+```
+
+The eval file lists cases of the form
+`{"query": "...", "expect": ["librarian-id"]}`; an empty `expect` means the
+correct outcome is no recommendation (these cases measure false positives).
+Cases can pin `records` metadata for deterministic corroboration evidence.
+The report gives top-1 accuracy, hit rate within the returned list, and the
+correct-rejection rate. `--keyword-only` forces the deterministic path;
+without it the semantic fallback runs exactly when the server would run it.
+`--min-pass-rate 0.9` turns the run into a regression gate (exit 1 below the
+threshold). The eval runs the same pipeline module the server uses, so its
+numbers are statements about real server behaviour.
 
 ## Usage Examples
 
@@ -137,6 +331,7 @@ From a Claude Code conversation:
 - "Do we have access to JSTOR?"
 - "search for databases with data on cost of living"
 - "Get the full details for record alma991234567890"
+- "Recommend a librarian for this accounting search"
 - "Generate APA7 citations for these records"
 - "Export these records as BibTeX"
 
