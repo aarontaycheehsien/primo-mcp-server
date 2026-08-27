@@ -1,0 +1,49 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python",
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/hooks/librarian_response_gate.py"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^mcp__primo__primo_(search|recommend_librarians)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python",
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/hooks/librarian_response_gate.py"
+            ],
+            "timeout": 10,
+            "statusMessage": "Recording librarian recommendation requirements"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python",
+            "args": [
+              "${CLAUDE_PROJECT_DIR}/hooks/librarian_response_gate.py"
+            ],
+            "timeout": 10,
+            "statusMessage": "Checking librarian recommendation format"
+          }
+        ]
+      }
+    ]
+  }
+}

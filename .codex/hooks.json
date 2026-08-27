@@ -1,0 +1,44 @@
+{
+  "description": "Enforce the final librarian recommendation response template.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/hooks/librarian_response_gate.py\"",
+            "commandWindows": "powershell.exe -NoProfile -Command \"$root = git rev-parse --show-toplevel; python (Join-Path $root 'hooks\\librarian_response_gate.py')\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^mcp__primo__primo_(search|recommend_librarians)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/hooks/librarian_response_gate.py\"",
+            "commandWindows": "powershell.exe -NoProfile -Command \"$root = git rev-parse --show-toplevel; python (Join-Path $root 'hooks\\librarian_response_gate.py')\"",
+            "timeout": 10,
+            "statusMessage": "Recording librarian recommendation requirements"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/hooks/librarian_response_gate.py\"",
+            "commandWindows": "powershell.exe -NoProfile -Command \"$root = git rev-parse --show-toplevel; python (Join-Path $root 'hooks\\librarian_response_gate.py')\"",
+            "timeout": 10,
+            "statusMessage": "Checking librarian recommendation format"
+          }
+        ]
+      }
+    ]
+  }
+}

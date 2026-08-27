@@ -85,7 +85,11 @@ mcp = FastMCP(
         "recommendations are limited to configured profile IDs; do not "
         "invent or substitute names. Whenever recommending a librarian, "
         "always include the server-provided Reasoning for that librarian; "
-        "never present a librarian recommendation without its reason."
+        "never present a librarian recommendation without its reason. In the "
+        "final user-facing response, render every recommendation exactly as "
+        "'- [Name](profile-url) - <email>' followed on the next line by "
+        "'  Reason: <server-provided Reasoning>'. Repeat the complete block "
+        "for every recommended librarian."
     ),
     lifespan=app_lifespan,
 )
@@ -386,6 +390,10 @@ async def primo_recommend_librarians(
     include the complete "Recommended librarian help:" section when summarising
     results, including the server-provided Reasoning for every recommended
     librarian. Never present a librarian recommendation without its reason.
+    In the final user-facing response, format each recommendation as a Markdown
+    bullet containing the linked name, a hyphen, and the angle-bracketed email;
+    put ``Reason:`` with the unchanged server-provided reasoning on the next
+    indented line.
 
     Args:
         query: User research topic or Primo search query.

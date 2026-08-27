@@ -137,6 +137,18 @@ so exact results remain distinguishable from exploratory matches.
 When recommending a librarian, always give the reason for that specific
 recommendation. Preserve the server-provided `Reasoning` field for every
 recommended librarian; never present a librarian recommendation without it.
+Render every recommended librarian in the final user-facing response with this
+exact two-line template:
+
+```text
+- [Name](profile-url) - <email@example.edu>
+  Reason: Server-provided reasoning.
+```
+
+Repeat the complete block for each recommendation. Do not paraphrase, exchange,
+or omit one librarian's reason. The project hooks capture matched Primo tool
+output and prevent Claude Code or Codex from stopping until every captured
+recommendation uses this template.
 
 ## Conventions
 

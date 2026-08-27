@@ -256,6 +256,29 @@ explain that the query passed semantic confidence checks despite having no
 exact keyword match. The formatter fails closed if either required explanation
 value is empty, preventing an unsupported recommendation from being emitted.
 
+### Claude Code and Codex response gate
+
+The repository includes the same librarian response gate for Claude Code and
+Codex. `.claude/settings.json` and `.codex/hooks.json` both run
+`hooks/librarian_response_gate.py` at `UserPromptSubmit`, `PostToolUse`, and
+`Stop`.
+
+When a Primo search or recommendation tool returns `Status: matched`, the hook
+captures every linked name, email, and server-provided `Reasoning`. It then
+requires the final response to repeat every recommendation exactly as:
+
+```text
+- [Name](profile-url) - <email@example.edu>
+  Reason: Server-provided reasoning.
+```
+
+The prompt-start hook clears stale state, the post-tool hook adds the exact
+required blocks to agent context, and the stop hook continues the turn when a
+block is missing or altered. State is stored temporarily outside the repository
+and removed after successful validation. Claude Code loads the project settings
+alongside any local settings. Codex users must review and trust the project hook
+definition with `/hooks` before it runs.
+
 When no recommendation clears the confidence threshold, `primo_list_librarians`
 returns the complete configured directory (name, title, contact, schools,
 best-for areas, and a sample of subjects) so a caller can still route the user
