@@ -133,6 +133,31 @@ class PrimoConfig(BaseSettings):
     # path also runs and may append additional candidates. Set to 0 to only
     # run the semantic fallback on a strict keyword miss (old behaviour).
     librarian_semantic_second_guess_score: float = 12.0
+    # Tier 3: LLM reasoning fallback, run only when keyword AND embedding
+    # matching both returned nothing. It catches the case both surface-form
+    # tiers are blind to -- a query whose subject is obvious to a person but
+    # shares no vocabulary with any profile. Off by default: it costs a
+    # model call, and the first two tiers answer the common cases.
+    librarian_llm_fallback: bool = False
+    # Any OpenAI-compatible chat-completions endpoint: Ollama, LM Studio,
+    # vLLM, OpenAI, OpenRouter, or Gemini's OpenAI-compatible endpoint.
+    # Defaults target Ollama, matching the local embedding defaults.
+    llm_url: str = "http://localhost:11434/v1"
+    llm_model: str = "gemma3:4b"
+    # Deliberately separate from embedding_api_key so a configured Gemini
+    # key can never travel to whatever host llm_url points at.
+    llm_api_key: str | None = None
+    llm_timeout: float = 20.0
+    # Floor on the model's SELF-REPORTED confidence. This is a coarse gate,
+    # not a calibrated threshold: unlike a cosine it is not comparable
+    # across queries or models, which is why it is kept out of the
+    # embedding path's self-calibrating mean+margin rule.
+    librarian_llm_min_confidence: float = 0.6
+    # Whether the LLM tier may run on the inline primo_search path. Off by
+    # default: inline recommendations ride on every ordinary search and must
+    # stay within a ~2.5s budget, while an explicit primo_recommend_librarians
+    # call is a user asking for a referral and can afford a model round trip.
+    librarian_llm_inline: bool = False
     # Optional Matryoshka truncation (e.g. 768) to cut cache size and latency.
     # gemini-embedding-001 degrades little when truncated; cosine scoring
     # renormalises, so no extra normalisation step is needed. Changing this

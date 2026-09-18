@@ -32,6 +32,7 @@ from primo_mcp_server.librarians import (
     LibrarianMatch,
     format_librarian_directory,
     format_librarian_recommendations,
+    is_llm_match,
     is_semantic_match,
     load_librarian_directory_cached,
     looks_like_identifier,
@@ -80,14 +81,27 @@ def _match_payload(match: LibrarianMatch) -> dict:
     """Serialise a configured librarian and the evidence supporting the match."""
     librarian = match.librarian
     semantic = is_semantic_match(match)
+    reasoned = is_llm_match(match)
+    if semantic:
+        match_type = "semantic"
+    elif reasoned:
+        match_type = "llm"
+    else:
+        match_type = "keyword"
     evidence: dict[str, object] = {
-        "match_type": "semantic" if semantic else "keyword",
+        "match_type": match_type,
         "score": match.score,
         "matched_terms": match.matched_terms,
         "evidence_fields": match.evidence_fields,
     }
     if semantic:
         evidence["cosine_similarity"] = match.score
+    if reasoned:
+        # Named so a caller cannot mistake it for a calibrated measurement.
+        evidence["self_reported_confidence"] = match.score
+        evidence["reasoning"] = (
+            match.matched_terms[0] if match.matched_terms else ""
+        )
 
     return {
         "id": librarian.id,
@@ -281,6 +295,8 @@ async def _format_recommendations_for_records(
             semantic_error=outcome.semantic_error,
             semantic_skipped=outcome.semantic_skipped,
             near_misses=outcome.near_misses,
+            llm_error=outcome.llm_error,
+            llm_skipped=outcome.llm_skipped,
         ),
         matches=outcome.matches,
         near_misses=outcome.near_misses,
@@ -320,6 +336,10 @@ def _log_recommendation_outcome(
         entry["semantic_error"] = outcome.semantic_error
     if outcome.semantic_skipped:
         entry["semantic_skipped"] = outcome.semantic_skipped
+    if outcome.llm_error:
+        entry["llm_error"] = outcome.llm_error
+    if outcome.llm_skipped:
+        entry["llm_skipped"] = outcome.llm_skipped
     try:
         path = Path(config.recommend_log_file).expanduser()
         with path.open("a", encoding="utf-8") as f:

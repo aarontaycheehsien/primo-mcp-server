@@ -10,6 +10,7 @@ from primo_mcp_server.evaluate_recommendations import (
     evaluate,
 )
 from primo_mcp_server.librarians import LibrarianDirectory
+from primo_mcp_server.recommendation import recommend_with_fallback
 
 
 def _directory() -> LibrarianDirectory:
@@ -243,3 +244,148 @@ async def test_semantic_near_miss_reaches_outcome(monkeypatch):
 
     assert outcome.matches == []
     assert outcome.near_misses == (near,)
+
+
+# ---------------------------------------------------------------------------
+# Tier 3: the LLM reasoning fallback's place in the pipeline.
+# ---------------------------------------------------------------------------
+
+
+def _llm_directory():
+    from primo_mcp_server.librarians import LibrarianDirectory
+
+    return LibrarianDirectory.model_validate(
+        {
+            "librarians": [
+                {
+                    "id": "accounting",
+                    "name": "Accounting Librarian",
+                    "subjects": ["accounting", "audit fees"],
+                },
+                {
+                    "id": "psych",
+                    "name": "Psychology Librarian",
+                    "subjects": ["behavioural science"],
+                },
+            ]
+        }
+    )
+
+
+def _llm_config(**overrides):
+    from primo_mcp_server.config import PrimoConfig
+
+    values = {
+        "librarian_semantic_fallback": False,
+        "librarian_llm_fallback": True,
+        "_env_file": None,
+    }
+    values.update(overrides)
+    return PrimoConfig(**values)
+
+
+def _patch_llm(monkeypatch, result, *, spy: list | None = None):
+    from primo_mcp_server import recommendation as rec
+
+    async def fake(directory, query, records, config, *, limit=2, **kwargs):
+        if spy is not None:
+            spy.append(query)
+        return result
+
+    monkeypatch.setattr(rec, "llm_fallback", fake)
+
+
+async def test_llm_tier_does_not_run_when_keywords_already_matched(monkeypatch):
+    """Tier 3 is the expensive path: a hit on tier 1 must short-circuit it."""
+    from primo_mcp_server.librarian_llm import LlmFallbackResult
+
+    calls: list[str] = []
+    _patch_llm(monkeypatch, LlmFallbackResult([]), spy=calls)
+
+    outcome = await recommend_with_fallback(
+        _llm_directory(),
+        "audit fees",
+        [],
+        _llm_config(librarian_min_score=1.0),
+    )
+
+    assert outcome.matches
+    assert calls == []
+
+
+async def test_llm_tier_supplies_matches_when_earlier_tiers_miss(monkeypatch):
+    from primo_mcp_server.librarian_llm import LlmFallbackResult
+    from primo_mcp_server.librarians import LibrarianMatch, is_llm_match
+
+    directory = _llm_directory()
+    reasoned = LibrarianMatch(
+        librarian=directory.librarians[1],
+        score=0.83,
+        matched_terms=["autism is behavioural science"],
+        evidence_fields=["llm"],
+    )
+    calls: list[str] = []
+    _patch_llm(monkeypatch, LlmFallbackResult([reasoned]), spy=calls)
+
+    outcome = await recommend_with_fallback(
+        directory, "autism", [], _llm_config(librarian_min_score=10_000.0)
+    )
+
+    assert [m.librarian.id for m in outcome.matches] == ["psych"]
+    assert is_llm_match(outcome.matches[0])
+    assert calls == ["autism"]
+    # A validated tier-3 match must not also be shadowed by near-misses.
+    assert outcome.near_misses == ()
+
+
+async def test_llm_tier_is_skipped_on_the_latency_sensitive_inline_path(monkeypatch):
+    """Inline recommendations ride every search and cannot afford a model call."""
+    from primo_mcp_server.librarian_llm import LlmFallbackResult
+
+    calls: list[str] = []
+    _patch_llm(monkeypatch, LlmFallbackResult([]), spy=calls)
+
+    outcome = await recommend_with_fallback(
+        _llm_directory(),
+        "autism",
+        [],
+        _llm_config(librarian_min_score=10_000.0),
+        embedding_timeout=2.5,
+    )
+
+    assert calls == []
+    assert outcome.llm_skipped is not None
+    assert "primo_recommend_librarians" in outcome.llm_skipped
+
+
+async def test_llm_tier_runs_inline_when_explicitly_opted_in(monkeypatch):
+    from primo_mcp_server.librarian_llm import LlmFallbackResult
+
+    calls: list[str] = []
+    _patch_llm(monkeypatch, LlmFallbackResult([]), spy=calls)
+
+    await recommend_with_fallback(
+        _llm_directory(),
+        "autism",
+        [],
+        _llm_config(librarian_min_score=10_000.0, librarian_llm_inline=True),
+        embedding_timeout=2.5,
+    )
+
+    assert calls == ["autism"]
+
+
+async def test_llm_tier_error_reaches_the_outcome(monkeypatch):
+    from primo_mcp_server.librarian_llm import LlmFallbackResult
+
+    _patch_llm(monkeypatch, LlmFallbackResult([], error="ConnectError"))
+
+    # "audit fees" scores against the accounting profile but cannot clear the
+    # unreachable threshold, so a near-miss exists to be preserved. A broken
+    # tier 3 must not cost the caller the evidence the earlier tiers found.
+    outcome = await recommend_with_fallback(
+        _llm_directory(), "audit fees", [], _llm_config(librarian_min_score=10_000.0)
+    )
+
+    assert outcome.llm_error == "ConnectError"
+    assert [near.librarian.id for near in outcome.near_misses] == ["accounting"]

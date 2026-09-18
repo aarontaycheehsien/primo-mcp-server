@@ -938,6 +938,28 @@ def is_semantic_match(match: LibrarianMatch) -> bool:
     return match.evidence_fields == ["semantic"]
 
 
+def is_llm_match(match: LibrarianMatch) -> bool:
+    """True when a match came from the tier-3 LLM reasoning fallback."""
+    return match.evidence_fields == ["llm"]
+
+
+def _llm_evidence(match: LibrarianMatch, *, closest: bool = False) -> str:
+    """Render an LLM match's evidence: its reasoning, labelled as such.
+
+    The score is the model's own estimate, so it is named "self-reported
+    confidence" rather than dressed up as a measurement -- a caller
+    deciding whether to pass this referral on needs to know the number is
+    not a calibrated one.
+    """
+    reason = match.matched_terms[0] if match.matched_terms else ""
+    lead = "closest by LLM reasoning" if closest else "Matched by LLM reasoning"
+    detail = f": {reason}" if reason else ""
+    return (
+        f"{lead}{detail} (self-reported confidence {match.score:.2f}; "
+        "no keyword or semantic match was found)"
+    )
+
+
 def _semantic_topic_clause(match: LibrarianMatch) -> str:
     """Name the profile topic behind a semantic match, when known.
 
@@ -960,6 +982,8 @@ def format_librarian_recommendations(
     semantic_skipped: str | None = None,
     skip_reason: str | None = None,
     near_misses: Sequence[LibrarianMatch] = (),
+    llm_error: str | None = None,
+    llm_skipped: str | None = None,
 ) -> str:
     """Format librarian recommendations for MCP responses.
 
@@ -1004,6 +1028,19 @@ def format_librarian_recommendations(
     else:
         error_note = None
 
+    # Tier 3's status is reported separately: "the reasoning tier broke" and
+    # "the embedding tier broke" are different facts about why a no_match
+    # may be understating what the directory could have offered.
+    if llm_error:
+        llm_note = (
+            "Note: the LLM reasoning fallback errored and was skipped "
+            f"({llm_error})."
+        )
+    elif llm_skipped:
+        llm_note = f"Note: the LLM reasoning fallback was skipped: {llm_skipped}."
+    else:
+        llm_note = None
+
     if not matches:
         lines = [
             _SECTION_HEADING,
@@ -1014,6 +1051,8 @@ def format_librarian_recommendations(
         ]
         if error_note:
             lines.append(error_note)
+        if llm_note:
+            lines.append(llm_note)
         if near_misses:
             lines.append(
                 "Closest configured profiles (scored below the confidence "
@@ -1027,6 +1066,8 @@ def format_librarian_recommendations(
                         f"{_semantic_topic_clause(match)} "
                         f"(cosine {match.score:.2f}); no keyword match"
                     )
+                elif is_llm_match(match):
+                    evidence = _llm_evidence(match, closest=True)
                 else:
                     evidence = _format_match_evidence(match)
                 lines.append(f"{i}. Name: {_format_linked_name(librarian)}")
@@ -1049,14 +1090,17 @@ def format_librarian_recommendations(
             )
         return "\n".join(lines)
 
-    status = (
-        "matched (semantic fallback)"
-        if all(is_semantic_match(match) for match in matches)
-        else "matched"
-    )
+    if all(is_llm_match(match) for match in matches):
+        status = "matched (LLM reasoning)"
+    elif all(is_semantic_match(match) for match in matches):
+        status = "matched (semantic fallback)"
+    else:
+        status = "matched"
     lines = [_SECTION_HEADING, "", f"Status: {status}"]
     if error_note:
         lines.append(error_note)
+    if llm_note:
+        lines.append(llm_note)
     for i, match in enumerate(matches, start=1):
         librarian = match.librarian
         semantic = is_semantic_match(match)
@@ -1067,6 +1111,8 @@ def format_librarian_recommendations(
                 f"(cosine {match.score:.2f}). "
                 "No exact keyword match was found"
             )
+        elif is_llm_match(match):
+            evidence = _llm_evidence(match)
         else:
             evidence = _format_match_evidence(match)
         lines.append(f"{i}. Name: {_format_linked_name(librarian)}")

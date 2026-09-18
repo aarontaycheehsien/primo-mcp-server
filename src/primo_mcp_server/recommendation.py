@@ -12,6 +12,7 @@ from typing import NamedTuple
 
 from primo_mcp_server.config import PrimoConfig
 from primo_mcp_server.librarian_embeddings import semantic_fallback
+from primo_mcp_server.librarian_llm import llm_fallback
 from primo_mcp_server.librarians import (
     _MAX_RECOMMENDATIONS,
     LibrarianDirectory,
@@ -27,7 +28,7 @@ _MAX_NEAR_MISSES = 2
 
 
 class RecommendationOutcome(NamedTuple):
-    """Ranked matches plus the semantic path's error/skip status."""
+    """Ranked matches plus each fallback tier's error/skip status."""
 
     matches: list[LibrarianMatch]
     semantic_error: str | None = None
@@ -37,6 +38,11 @@ class RecommendationOutcome(NamedTuple):
     # user to a librarian always has real evidence to show; they are never
     # validated recommendations.
     near_misses: tuple[LibrarianMatch, ...] = ()
+    # Tier 3 status, kept separate from the semantic tier's so a caller can
+    # tell which fallback broke. Appended last to keep positional
+    # construction by existing callers valid.
+    llm_error: str | None = None
+    llm_skipped: str | None = None
 
 
 async def recommend_with_fallback(
@@ -103,6 +109,32 @@ async def recommend_with_fallback(
             ]
         )[:capped_limit]
 
+    # Tier 3 runs only on a clean miss from both surface-form tiers: it is
+    # the expensive path, and it exists for queries whose subject no shared
+    # vocabulary reveals. ``embedding_timeout`` is the established signal
+    # for a latency-sensitive caller (the inline primo_search path), which
+    # cannot afford a model round trip unless explicitly opted in.
+    llm_error: str | None = None
+    llm_skipped: str | None = None
+    latency_sensitive = embedding_timeout is not None
+    if config.librarian_llm_fallback and not matches:
+        if latency_sensitive and not config.librarian_llm_inline:
+            llm_skipped = (
+                "the LLM tier does not run on inline searches; call "
+                "primo_recommend_librarians for a reasoned referral"
+            )
+        else:
+            reasoned = await llm_fallback(
+                directory,
+                query,
+                records,
+                config,
+                limit=capped_limit,
+            )
+            llm_error = reasoned.error
+            llm_skipped = reasoned.skipped
+            matches = reasoned.matches[:capped_limit]
+
     # When nothing cleared the threshold on either path, keep the closest
     # candidates so the no_match output can show why the best were not good
     # enough. Keyword near-misses come first (matched terms explain more
@@ -117,5 +149,10 @@ async def recommend_with_fallback(
             combined.append(semantic_near_miss)
         near_misses = tuple(combined[:_MAX_NEAR_MISSES])
     return RecommendationOutcome(
-        matches, semantic_error, semantic_skipped, near_misses
+        matches,
+        semantic_error,
+        semantic_skipped,
+        near_misses,
+        llm_error,
+        llm_skipped,
     )

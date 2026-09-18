@@ -220,6 +220,13 @@ environment variables:
 | `PRIMO_EMBEDDING_INLINE_TIMEOUT` | `2.5` | Tighter embedding budget for inline `primo_search` recommendations |
 | `PRIMO_EMBEDDING_RETRY_ATTEMPTS` | `3` | How many times an HTTP 429 is waited out and retried (never on the inline path) |
 | `PRIMO_EMBEDDING_RETRY_MAX_DELAY` | `65.0` | Cap in seconds on the wait honoured from the server's `Retry-After`/`RetryInfo` advice |
+| `PRIMO_LIBRARIAN_LLM_FALLBACK` | `false` | Enable the tier-3 LLM reasoning fallback (runs only when keyword and embedding tiers both miss) |
+| `PRIMO_LLM_URL` | `http://localhost:11434/v1` | OpenAI-compatible chat-completions endpoint (Ollama, LM Studio, vLLM, OpenAI, OpenRouter, Gemini OpenAI-compat) |
+| `PRIMO_LLM_MODEL` | `gemma3:4b` | Model used for the reasoning tier |
+| `PRIMO_LLM_API_KEY` | unset | Bearer token for the endpoint above; kept separate from `PRIMO_EMBEDDING_API_KEY` |
+| `PRIMO_LLM_TIMEOUT` | `20.0` | HTTP timeout for the reasoning call in seconds |
+| `PRIMO_LIBRARIAN_LLM_MIN_CONFIDENCE` | `0.6` | Floor on the model's self-reported confidence; a coarse gate, not a calibrated threshold |
+| `PRIMO_LIBRARIAN_LLM_INLINE` | `false` | Allow the reasoning tier on inline `primo_search` recommendations |
 
 See `.env.example` for a commented template.
 
@@ -308,6 +315,37 @@ a genuine no-match. Semantic matches are labelled
 callers can reason about confidence. Identifier-shaped queries (DOIs, ISBNs,
 ISSNs, Alma/CDI record ids) skip librarian recommendations entirely on both
 paths.
+
+### LLM reasoning fallback (optional, tier 3)
+
+Keyword matching and embedding similarity both compare surface forms, so
+both are blind to a query whose subject is plain to a person but shares no
+vocabulary with any profile — "autism" against a profile that says
+"behavioural science, wellbeing, survey data" scores near zero on each, and
+the min-token gate skips embedding for one-word queries entirely.
+
+Set `PRIMO_LIBRARIAN_LLM_FALLBACK=true` to add a third tier that asks a model
+to reason about that gap. It runs **only when the first two tiers return
+nothing**, so the cost falls on a miss, never on a hit. Point
+`PRIMO_LLM_URL` / `PRIMO_LLM_MODEL` at any OpenAI-compatible
+chat-completions endpoint (Ollama, LM Studio, vLLM, OpenAI, OpenRouter, or
+Gemini's OpenAI-compatible endpoint); `PRIMO_LLM_API_KEY` is kept separate
+from `PRIMO_EMBEDDING_API_KEY` so a Gemini key never travels to another host.
+
+The tier is constrained in code, not by prompt alone: only ids present in the
+directory survive validation (an invented id is logged and discarded, never
+rendered), curator `excludes` deny-lists are re-applied afterwards, and a
+choice that gives no reason is dropped, because evidence is mandatory for any
+librarian shown to a user. Matches are labelled
+`Status: matched (LLM reasoning)` and report the model's **self-reported
+confidence** — deliberately named, since unlike a cosine it is not comparable
+across queries and is never fed into the embedding tier's self-calibrating
+threshold.
+
+It stays off the inline `primo_search` path by default, where
+recommendations ride on every search and must stay inside a ~2.5s budget;
+the explicit `primo_recommend_librarians` tool always runs it. Set
+`PRIMO_LIBRARIAN_LLM_INLINE=true` to allow it inline too.
 
 When `PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS=true` and a configured profile
 meets the score threshold, `primo_search` puts a Markdown section headed

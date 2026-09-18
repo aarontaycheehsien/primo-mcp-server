@@ -1362,3 +1362,81 @@ def test_format_semantic_near_miss_names_the_matched_profile_topic():
         'closest by semantic similarity to profile topic '
         '"financial databases" (cosine 0.44); no keyword match'
     ) in output
+
+
+# ---------------------------------------------------------------------------
+# Tier-3 (LLM reasoning) rendering.
+# ---------------------------------------------------------------------------
+
+
+def _llm_match(reason="autism is behavioural science", score=0.83):
+    from primo_mcp_server.librarians import LibrarianMatch, LibrarianProfile
+
+    return LibrarianMatch(
+        librarian=LibrarianProfile(
+            id="psych",
+            name="Psychology Librarian",
+            title="Behavioural Science Librarian",
+            email="psych@example.edu",
+        ),
+        score=score,
+        matched_terms=[reason],
+        evidence_fields=["llm"],
+    )
+
+
+def test_llm_match_renders_its_reasoning_as_evidence():
+    from primo_mcp_server.librarians import format_librarian_recommendations
+
+    output = format_librarian_recommendations([_llm_match()], "autism")
+
+    assert "Status: matched (LLM reasoning)" in output
+    assert "Matched by LLM reasoning: autism is behavioural science" in output
+    # The number is the model's own, and must be labelled as such rather
+    # than presented as a measurement.
+    assert "self-reported confidence 0.83" in output
+    assert "Psychology Librarian" in output
+
+
+def test_llm_near_miss_is_labelled_closest_not_matched():
+    from primo_mcp_server.librarians import format_librarian_recommendations
+
+    output = format_librarian_recommendations(
+        [], "autism", near_misses=[_llm_match()]
+    )
+
+    assert "Status: no_match" in output
+    assert "closest by LLM reasoning" in output
+    assert "below the confidence threshold" in output
+
+
+def test_llm_tier_error_and_skip_notes_are_reported():
+    from primo_mcp_server.librarians import format_librarian_recommendations
+
+    errored = format_librarian_recommendations([], "autism", llm_error="ConnectError")
+    assert "LLM reasoning fallback errored" in errored
+    assert "ConnectError" in errored
+
+    skipped = format_librarian_recommendations(
+        [], "autism", llm_skipped="the LLM tier does not run on inline searches"
+    )
+    assert "LLM reasoning fallback was skipped" in skipped
+    assert "inline searches" in skipped
+
+
+def test_mixed_keyword_and_llm_matches_keep_the_plain_matched_status():
+    from primo_mcp_server.librarians import (
+        LibrarianMatch,
+        LibrarianProfile,
+        format_librarian_recommendations,
+    )
+
+    keyword = LibrarianMatch(
+        librarian=LibrarianProfile(id="acc", name="Accounting Librarian"),
+        score=42.0,
+        matched_terms=["accounting"],
+        evidence_fields=["subjects"],
+    )
+    output = format_librarian_recommendations([keyword, _llm_match()], "mixed")
+
+    assert "Status: matched\n" in output

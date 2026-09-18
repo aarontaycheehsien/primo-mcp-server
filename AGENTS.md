@@ -26,9 +26,10 @@ This is the canonical agent guidance file for this fork.
 - `src/primo_mcp_server/exporters.py` -- BibTeX, RIS, CSV export
 - `src/primo_mcp_server/librarians.py` -- Librarian directory loading and keyword recommendation matching
 - `src/primo_mcp_server/librarian_embeddings.py` -- Optional Gemini embedding semantic fallback for recommendations (per-term vectors, max cosine per profile)
+- `src/primo_mcp_server/librarian_llm.py` -- Optional tier-3 LLM reasoning fallback (closed-vocabulary, evidence-bearing; runs only when keyword and embedding tiers both miss)
 - `src/primo_mcp_server/calibrate_embeddings.py` -- CLI for calibrating semantic fallback thresholds
 - `src/primo_mcp_server/profile_tools.py` -- Curator CLI: convert a CSV profile source to JSON and lint the directory
-- `src/primo_mcp_server/recommendation.py` -- Combined keyword + semantic recommendation pipeline (shared by the server and the evaluation harness)
+- `src/primo_mcp_server/recommendation.py` -- Combined keyword + semantic + LLM recommendation pipeline (shared by the server and the evaluation harness)
 - `src/primo_mcp_server/evaluate_recommendations.py` -- CLI benchmark: golden labelled queries against the recommendation pipeline
 
 ## Running Tests
@@ -72,6 +73,10 @@ score thresholds, margins, timeouts, and the query token gate):
   LOCAL_DOCUMENT_PREFIX prompts stand in for Gemini's taskType. Re-run the
   calibration CLI when switching models; the cosine floor was tuned for
   gemini-embedding-001.
+- PRIMO_LIBRARIAN_LLM_FALLBACK -- enable the tier-3 LLM reasoning fallback
+  (default false); PRIMO_LLM_URL / PRIMO_LLM_MODEL / PRIMO_LLM_API_KEY set
+  the OpenAI-compatible endpoint, and PRIMO_LIBRARIAN_LLM_INLINE lets it
+  run on inline searches (default false)
 
 ## Search Scope Policy
 
@@ -135,6 +140,34 @@ the user asks who the librarians are. Deterministic keyword matching runs first,
 with an optional Gemini embedding fallback when keyword matches are weak
 or absent. Identifier-shaped queries (DOI, ISBN, ISSN, record IDs) skip
 recommendations entirely. Recommendation counts are capped at 3.
+
+### Tier 3: LLM reasoning fallback
+
+`librarian_llm.py` adds an optional third tier that runs only when keyword
+matching AND the embedding fallback both return nothing
+(`PRIMO_LIBRARIAN_LLM_FALLBACK=true`, off by default). It exists for the
+case both surface-form tiers are structurally blind to: a query whose
+subject is obvious to a person but shares no vocabulary with any profile.
+
+The tier is constrained in code, not by prompt alone:
+
+- **Closed vocabulary.** Only ids present in the directory survive
+  `parse_choices`; an unknown id is logged and discarded, never rendered.
+- **Deny-lists re-applied.** `excludes` is re-checked after the model
+  answers, so tier 3 cannot resurrect a suppressed profile.
+- **Evidence mandatory.** A choice with no `reason` is dropped.
+- **Self-reported confidence.** The score is the model's own estimate,
+  gated by a coarse floor and labelled "self-reported" everywhere it is
+  shown. It is deliberately NOT fed into the embedding path's
+  self-calibrating mean+margin rule, which would treat it as a calibrated
+  measurement it is not.
+- **Off the inline path by default.** Inline recommendations ride on every
+  search and must stay inside a ~2.5s budget, so the tier runs only for
+  the explicit `primo_recommend_librarians` tool unless
+  `PRIMO_LIBRARIAN_LLM_INLINE=true`.
+
+Any OpenAI-compatible chat-completions endpoint works. `llm_api_key` is
+separate from `embedding_api_key` so a Gemini key can never travel to it.
 
 Evidence must always accompany any librarian shown to the user. Validated
 matches carry matched terms and evidence fields (or cosine similarity for
