@@ -1440,3 +1440,66 @@ def test_mixed_keyword_and_llm_matches_keep_the_plain_matched_status():
     output = format_librarian_recommendations([keyword, _llm_match()], "mixed")
 
     assert "Status: matched\n" in output
+
+
+def test_routing_request_keeps_near_miss_evidence_without_conflicting_permission():
+    """A routing request must not silently discard keyword evidence.
+
+    Regression: an early return once dropped the near-miss block entirely,
+    losing the matched terms the keyword tier had already found. They are
+    kept, but relabelled -- under a routing request they are input to the
+    caller's decision, not contacts it may pass on, because two conflicting
+    permissions would be worse than none.
+    """
+    from primo_mcp_server.librarians import (
+        LibrarianMatch,
+        LibrarianProfile,
+        format_librarian_recommendations,
+    )
+
+    near = LibrarianMatch(
+        librarian=LibrarianProfile(id="biz", name="Business Librarian"),
+        score=2.0,
+        matched_terms=["market"],
+        evidence_fields=["subjects"],
+    )
+    output = format_librarian_recommendations(
+        [],
+        "seafood",
+        near_misses=[near],
+        llm_routing_request="ROUTING REQUEST: call primo_submit_librarian_choice",
+    )
+
+    assert "Business Librarian" in output
+    assert "matched terms: market" in output
+    assert "NOT people you may name" in output
+    # The permissive near-miss wording must not appear alongside a routing
+    # request; the routing rule is the only rule about what may be shown.
+    assert "If you still refer the user" not in output
+    assert output.strip().endswith(
+        "the evidence primo_submit_librarian_choice returned."
+    )
+    assert "Status: no_match" in output
+
+
+def test_routing_request_without_near_misses_still_ends_on_the_evidence_rule():
+    from primo_mcp_server.librarians import format_librarian_recommendations
+
+    output = format_librarian_recommendations(
+        [], "seafood", llm_routing_request="ROUTING REQUEST"
+    )
+
+    assert "Status: no_match" in output
+    assert "ROUTING REQUEST" in output
+    assert "Never present a librarian as recommended" in output
+
+
+def test_plain_no_match_output_is_unchanged_by_the_routing_tier():
+    """Without a routing request the original guidance must survive intact."""
+    from primo_mcp_server.librarians import format_librarian_recommendations
+
+    output = format_librarian_recommendations([], "seafood")
+
+    assert "No configured profile matched even weakly" in output
+    assert "primo_list_librarians" in output
+    assert "never present a librarian as recommended without showing" in output

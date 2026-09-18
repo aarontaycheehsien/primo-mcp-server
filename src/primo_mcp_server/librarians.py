@@ -1054,17 +1054,18 @@ def format_librarian_recommendations(
             lines.append(error_note)
         if llm_note:
             lines.append(llm_note)
-        if llm_routing_request:
-            # Status stays no_match: this is a task for the caller, not a
-            # recommendation. Nothing here may be shown to a user until
-            # primo_submit_librarian_choice has validated a choice.
-            lines.append("")
-            lines.append(llm_routing_request)
-            return "\n".join(lines)
         if near_misses:
+            # Under a routing request these are evidence for the caller's
+            # decision, not contacts it may pass on: the routing request
+            # that follows is the single rule about what may be shown, and
+            # two conflicting permissions would be worse than none.
             lines.append(
                 "Closest configured profiles (scored below the confidence "
-                "threshold; NOT validated recommendations):"
+                "threshold; evidence for your routing decision, NOT people "
+                "you may name):"
+                if llm_routing_request
+                else "Closest configured profiles (scored below the "
+                "confidence threshold; NOT validated recommendations):"
             )
             for i, match in enumerate(near_misses, start=1):
                 librarian = match.librarian
@@ -1084,17 +1085,30 @@ def format_librarian_recommendations(
                 lines.append(
                     f"   Evidence: {evidence} (below the confidence threshold)"
                 )
-            lines.append(
-                "If you still refer the user to one of these, present them "
-                "as the closest configured contact rather than a validated "
-                "recommendation, and always include the evidence shown above."
-            )
-        else:
+            if not llm_routing_request:
+                lines.append(
+                    "If you still refer the user to one of these, present "
+                    "them as the closest configured contact rather than a "
+                    "validated recommendation, and always include the "
+                    "evidence shown above."
+                )
+        elif not llm_routing_request:
             lines.append(
                 "No configured profile matched even weakly. If the user "
                 "still wants a contact, use primo_list_librarians and "
                 "present the result as directory information; never present "
                 "a librarian as recommended without showing evidence."
+            )
+        if llm_routing_request:
+            # Last word, so the rule a caller reads most recently is the
+            # strict one. Status stays no_match: this is a task, never a
+            # recommendation, and nothing may reach a user until
+            # primo_submit_librarian_choice has validated a choice.
+            lines.append("")
+            lines.append(llm_routing_request)
+            lines.append(
+                "Never present a librarian as recommended without showing "
+                "the evidence primo_submit_librarian_choice returned."
             )
         return "\n".join(lines)
 
