@@ -166,8 +166,13 @@ The tier is constrained in code, not by prompt alone:
   the explicit `primo_recommend_librarians` tool unless
   `PRIMO_LIBRARIAN_LLM_INLINE=true`.
 
-Any OpenAI-compatible chat-completions endpoint works. `llm_api_key` is
-separate from `embedding_api_key` so a Gemini key can never travel to it.
+`PRIMO_LLM_PROVIDER` selects the backend. `sampling` (the default) asks the
+connected MCP client to run the completion on the model already driving the
+conversation -- no key, no endpoint, no extra quota -- and needs the live
+session, so only the server can supply it; the offline eval harness has none
+and must use `openai`. `openai` reaches any OpenAI-compatible
+chat-completions endpoint, with `llm_api_key` separate from
+`embedding_api_key` so a Gemini key can never travel to it.
 
 Evidence must always accompany any librarian shown to the user. Validated
 matches carry matched terms and evidence fields (or cosine similarity for

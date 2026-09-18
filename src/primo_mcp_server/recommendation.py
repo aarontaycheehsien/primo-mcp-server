@@ -12,7 +12,7 @@ from typing import NamedTuple
 
 from primo_mcp_server.config import PrimoConfig
 from primo_mcp_server.librarian_embeddings import semantic_fallback
-from primo_mcp_server.librarian_llm import llm_fallback
+from primo_mcp_server.librarian_llm import Reasoner, llm_fallback
 from primo_mcp_server.librarians import (
     _MAX_RECOMMENDATIONS,
     LibrarianDirectory,
@@ -54,6 +54,7 @@ async def recommend_with_fallback(
     limit: int = 2,
     specificity: dict[str, float] | None = None,
     embedding_timeout: float | None = None,
+    reasoner: Reasoner | None = None,
 ) -> RecommendationOutcome:
     """Rank librarians by keywords, second-guessed by the semantic path.
 
@@ -130,6 +131,7 @@ async def recommend_with_fallback(
                 records,
                 config,
                 limit=capped_limit,
+                reasoner=reasoner,
             )
             llm_error = reasoned.error
             llm_skipped = reasoned.skipped

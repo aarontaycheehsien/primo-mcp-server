@@ -139,6 +139,16 @@ class PrimoConfig(BaseSettings):
     # shares no vocabulary with any profile. Off by default: it costs a
     # model call, and the first two tiers answer the common cases.
     librarian_llm_fallback: bool = False
+    # "sampling" asks the connected MCP client to run the completion on the
+    # model already driving the conversation -- no API key, no second
+    # endpoint, no cost to the server operator. Requires a client that
+    # implements MCP sampling; when it does not, the tier reports an error
+    # and the recommendation degrades to the earlier tiers. "openai" uses
+    # llm_url/llm_model/llm_api_key instead, and is the only option
+    # available to non-server callers such as the offline eval harness,
+    # which has no client session.
+    llm_provider: str = "sampling"
+    llm_max_tokens: int = 512
     # Any OpenAI-compatible chat-completions endpoint: Ollama, LM Studio,
     # vLLM, OpenAI, OpenRouter, or Gemini's OpenAI-compatible endpoint.
     # Defaults target Ollama, matching the local embedding defaults.

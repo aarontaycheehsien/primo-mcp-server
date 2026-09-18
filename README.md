@@ -221,6 +221,8 @@ environment variables:
 | `PRIMO_EMBEDDING_RETRY_ATTEMPTS` | `3` | How many times an HTTP 429 is waited out and retried (never on the inline path) |
 | `PRIMO_EMBEDDING_RETRY_MAX_DELAY` | `65.0` | Cap in seconds on the wait honoured from the server's `Retry-After`/`RetryInfo` advice |
 | `PRIMO_LIBRARIAN_LLM_FALLBACK` | `false` | Enable the tier-3 LLM reasoning fallback (runs only when keyword and embedding tiers both miss) |
+| `PRIMO_LLM_PROVIDER` | `sampling` | `sampling` runs on the connected MCP client's own model (no key, no endpoint); `openai` uses the settings below |
+| `PRIMO_LLM_MAX_TOKENS` | `512` | Token budget for the reasoning completion |
 | `PRIMO_LLM_URL` | `http://localhost:11434/v1` | OpenAI-compatible chat-completions endpoint (Ollama, LM Studio, vLLM, OpenAI, OpenRouter, Gemini OpenAI-compat) |
 | `PRIMO_LLM_MODEL` | `gemma3:4b` | Model used for the reasoning tier |
 | `PRIMO_LLM_API_KEY` | unset | Bearer token for the endpoint above; kept separate from `PRIMO_EMBEDDING_API_KEY` |
@@ -326,11 +328,22 @@ the min-token gate skips embedding for one-word queries entirely.
 
 Set `PRIMO_LIBRARIAN_LLM_FALLBACK=true` to add a third tier that asks a model
 to reason about that gap. It runs **only when the first two tiers return
-nothing**, so the cost falls on a miss, never on a hit. Point
-`PRIMO_LLM_URL` / `PRIMO_LLM_MODEL` at any OpenAI-compatible
-chat-completions endpoint (Ollama, LM Studio, vLLM, OpenAI, OpenRouter, or
-Gemini's OpenAI-compatible endpoint); `PRIMO_LLM_API_KEY` is kept separate
-from `PRIMO_EMBEDDING_API_KEY` so a Gemini key never travels to another host.
+nothing**, so the cost falls on a miss, never on a hit.
+
+Two backends, selected with `PRIMO_LLM_PROVIDER`:
+
+- **`sampling`** (default) uses [MCP sampling](https://modelcontextprotocol.io/docs/concepts/sampling):
+  the server asks the connected client to run the completion on the model
+  already driving the conversation. No API key, no second endpoint, nothing
+  extra to keep alive. Sampling is an optional part of the protocol, so a
+  client may not implement it or may decline a request; either surfaces as a
+  tier error and the recommendation degrades to the earlier tiers. The
+  offline eval harness has no client session and must use `openai`.
+- **`openai`** points `PRIMO_LLM_URL` / `PRIMO_LLM_MODEL` at any
+  OpenAI-compatible chat-completions endpoint (Ollama, LM Studio, vLLM,
+  OpenAI, OpenRouter, or Gemini's OpenAI-compatible endpoint).
+  `PRIMO_LLM_API_KEY` is kept separate from `PRIMO_EMBEDDING_API_KEY` so a
+  Gemini key never travels to another host.
 
 The tier is constrained in code, not by prompt alone: only ids present in the
 directory survive validation (an invented id is logged and discarded, never

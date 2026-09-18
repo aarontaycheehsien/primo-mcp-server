@@ -28,6 +28,7 @@ from primo_mcp_server.formatter import (
     search_query_label,
 )
 from primo_mcp_server.librarian_embeddings import warm_up_local_embedder
+from primo_mcp_server.librarian_llm import Reasoner, sampling_reasoner
 from primo_mcp_server.librarians import (
     LibrarianMatch,
     format_librarian_directory,
@@ -232,6 +233,22 @@ def _get_config(ctx: Context) -> PrimoConfig:
     return ctx.request_context.lifespan_context["config"]
 
 
+def _reasoner_for(ctx: Context, config: PrimoConfig) -> Reasoner | None:
+    """Build the tier-3 reasoner when it is configured to use sampling.
+
+    Only the server can supply one: sampling runs on the connected client's
+    model, so it needs the live session. Returning None leaves llm_fallback
+    on its configured HTTP endpoint.
+    """
+    if not config.librarian_llm_fallback:
+        return None
+    if config.llm_provider.strip().lower() != "sampling":
+        return None
+    return sampling_reasoner(
+        ctx.session, config=config, related_request_id=ctx.request_id
+    )
+
+
 async def _format_recommendations_for_records(
     config: PrimoConfig,
     query: str,
@@ -239,6 +256,7 @@ async def _format_recommendations_for_records(
     *,
     limit: int = 2,
     embedding_timeout: float | None = None,
+    reasoner: Reasoner | None = None,
 ) -> FormattedRecommendation:
     """Load configured profiles and format validated recommendations.
 
@@ -285,6 +303,7 @@ async def _format_recommendations_for_records(
         limit=limit,
         specificity=specificity,
         embedding_timeout=embedding_timeout,
+        reasoner=reasoner,
     )
     _log_recommendation_outcome(config, query, outcome)
     return FormattedRecommendation(
@@ -429,6 +448,7 @@ async def primo_search(
                 # slow embedding call gets a tighter budget than the explicit
                 # primo_recommend_librarians tool.
                 embedding_timeout=config.embedding_inline_timeout,
+                reasoner=_reasoner_for(ctx, config),
             )
             if recommendation.status == "matched":
                 result = (
@@ -606,6 +626,7 @@ async def primo_recommend_librarians(
         query,
         records,
         limit=limit,
+        reasoner=_reasoner_for(ctx, config),
     )
     return recommendation.text
 

@@ -305,7 +305,9 @@ async def test_default_backend_posts_openai_chat_completions():
         )
     )
 
-    result = await llm_fallback(_directory(), "autism", None, _config())
+    result = await llm_fallback(
+        _directory(), "autism", None, _config(llm_provider="openai")
+    )
 
     assert [match.librarian.id for match in result.matches] == ["psych"]
     request = json.loads(route.calls[0].request.content)
@@ -327,9 +329,113 @@ async def test_llm_key_is_sent_only_to_the_configured_llm_host():
         _directory(),
         "autism",
         None,
-        _config(llm_api_key="llm-secret", embedding_api_key="gemini-secret"),
+        _config(
+            llm_provider="openai",
+            llm_api_key="llm-secret",
+            embedding_api_key="gemini-secret",
+        ),
     )
 
     headers = route.calls[0].request.headers
     assert headers["Authorization"] == "Bearer llm-secret"
     assert "gemini-secret" not in str(headers)
+
+
+# ---------------------------------------------------------------------------
+# MCP sampling backend: the tier runs on the connected client's own model.
+# ---------------------------------------------------------------------------
+
+
+class _FakeSession:
+    """Stands in for the MCP ServerSession's sampling endpoint."""
+
+    def __init__(self, text: str | None = None, error: Exception | None = None):
+        self.text = text
+        self.error = error
+        self.calls: list[dict] = []
+
+    async def create_message(self, **kwargs):
+        from types import SimpleNamespace
+
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(
+            content=SimpleNamespace(type="text", text=self.text)
+        )
+
+
+async def test_sampling_reasoner_asks_the_client_model():
+    from primo_mcp_server.librarian_llm import sampling_reasoner
+
+    session = _FakeSession(
+        _completion([{"id": "psych", "confidence": 0.9, "reason": "behavioural"}])
+    )
+    config = _config()
+
+    result = await llm_fallback(
+        _directory(),
+        "autism",
+        None,
+        config,
+        reasoner=sampling_reasoner(session, config=config),
+    )
+
+    assert [match.librarian.id for match in result.matches] == ["psych"]
+    call = session.calls[0]
+    assert call["temperature"] == 0
+    # Conversation context would add noise and cost; the prompt is complete.
+    assert call["include_context"] == "none"
+    assert "id=psych" in call["messages"][0].content.text
+
+
+async def test_sampling_refusal_degrades_to_a_tier_error():
+    """A client that does not implement sampling must not break the tool."""
+    from primo_mcp_server.librarian_llm import sampling_reasoner
+
+    session = _FakeSession(error=RuntimeError("Method not found"))
+    config = _config()
+
+    result = await llm_fallback(
+        _directory(),
+        "autism",
+        None,
+        config,
+        reasoner=sampling_reasoner(session, config=config),
+    )
+
+    assert result.matches == []
+    assert result.error == "RuntimeError"
+
+
+async def test_non_text_sampling_content_is_an_error():
+    from types import SimpleNamespace
+
+    from primo_mcp_server.librarian_llm import sampling_reasoner
+
+    class _ImageSession(_FakeSession):
+        async def create_message(self, **kwargs):
+            return SimpleNamespace(content=SimpleNamespace(type="image"))
+
+    config = _config()
+    result = await llm_fallback(
+        _directory(),
+        "autism",
+        None,
+        config,
+        reasoner=sampling_reasoner(_ImageSession(), config=config),
+    )
+
+    assert result.matches == []
+    assert result.error == "ValueError"
+
+
+async def test_sampling_provider_without_a_session_is_skipped_not_guessed():
+    """The offline eval harness has no client session; say so explicitly."""
+    result = await llm_fallback(
+        _directory(), "autism", None, _config(llm_provider="sampling")
+    )
+
+    assert result.matches == []
+    assert result.skipped is not None
+    assert "sampling" in result.skipped

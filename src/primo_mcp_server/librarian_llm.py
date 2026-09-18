@@ -238,6 +238,45 @@ def parse_choices(
     return matches[:limit]
 
 
+def sampling_reasoner(session, *, config: PrimoConfig, related_request_id=None) -> Reasoner:
+    """Build a reasoner backed by MCP sampling.
+
+    The server asks the connected client to run the completion on the model
+    already driving the conversation, so this tier needs no API key, no
+    second endpoint to keep alive, and costs the operator nothing beyond
+    the client's own usage.
+
+    Sampling is an optional part of the MCP protocol: a client is free not
+    to implement it, and one that does may still decline an individual
+    request. Either shows up as an exception from ``create_message``, which
+    ``llm_fallback`` catches and reports as a tier error -- the same
+    fail-closed path as an unreachable HTTP endpoint.
+    """
+    from mcp.types import SamplingMessage, TextContent
+
+    async def call(prompt: str) -> str:
+        result = await session.create_message(
+            messages=[
+                SamplingMessage(
+                    role="user", content=TextContent(type="text", text=prompt)
+                )
+            ],
+            max_tokens=config.llm_max_tokens,
+            # The directory and query are supplied in full in the prompt;
+            # conversation context would only add noise and cost.
+            include_context="none",
+            temperature=0,
+        )
+        content = result.content
+        if getattr(content, "type", None) != "text":
+            raise ValueError(
+                f"sampling returned non-text content ({getattr(content, 'type', '?')})"
+            )
+        return content.text
+
+    return call
+
+
 async def _openai_chat(
     prompt: str, *, config: PrimoConfig, timeout: float | None
 ) -> str:
@@ -291,6 +330,19 @@ async def llm_fallback(
         return LlmFallbackResult([])
     if not directory.librarians:
         return LlmFallbackResult([], skipped="the librarian directory is empty")
+
+    if reasoner is None and config.llm_provider.strip().lower() == "sampling":
+        # Sampling needs the live client session, which only the server can
+        # supply. Reaching here without one means a non-server caller (the
+        # offline eval harness) is configured for sampling; say so rather
+        # than silently falling back to an endpoint that may not exist.
+        return LlmFallbackResult(
+            [],
+            skipped=(
+                'llm_provider is "sampling", which requires the MCP client '
+                "session; this caller has none"
+            ),
+        )
 
     prompt = build_prompt(directory, query, records, limit=limit)
     call = reasoner or (
