@@ -43,6 +43,9 @@ class RecommendationOutcome(NamedTuple):
     # construction by existing callers valid.
     llm_error: str | None = None
     llm_skipped: str | None = None
+    # Populated by the "caller" backend: the routing task addressed to the
+    # calling model. A request for a decision, never a recommendation.
+    llm_routing_request: str | None = None
 
 
 async def recommend_with_fallback(
@@ -117,6 +120,7 @@ async def recommend_with_fallback(
     # cannot afford a model round trip unless explicitly opted in.
     llm_error: str | None = None
     llm_skipped: str | None = None
+    llm_routing_request: str | None = None
     latency_sensitive = embedding_timeout is not None
     if config.librarian_llm_fallback and not matches:
         if latency_sensitive and not config.librarian_llm_inline:
@@ -135,6 +139,7 @@ async def recommend_with_fallback(
             )
             llm_error = reasoned.error
             llm_skipped = reasoned.skipped
+            llm_routing_request = reasoned.routing_request
             matches = reasoned.matches[:capped_limit]
 
     # When nothing cleared the threshold on either path, keep the closest
@@ -157,4 +162,5 @@ async def recommend_with_fallback(
         near_misses,
         llm_error,
         llm_skipped,
+        llm_routing_request,
     )

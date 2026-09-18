@@ -63,6 +63,7 @@ pytest tests/ -v
 | `primo_get_record` | Get full details for a record by Primo record ID |
 | `primo_suggest` | Get autocomplete suggestions |
 | `primo_recommend_librarians` | Recommend configured librarian help for a query or selected records |
+| `primo_submit_librarian_choice` | Validate a caller-reasoned librarian choice against the configured directory and format it |
 | `primo_list_librarians` | List every configured librarian profile with contact and coverage |
 | `primo_cite` | Generate formatted citations |
 | `primo_export` | Export records as BibTeX, RIS, or CSV |
@@ -221,14 +222,14 @@ environment variables:
 | `PRIMO_EMBEDDING_RETRY_ATTEMPTS` | `3` | How many times an HTTP 429 is waited out and retried (never on the inline path) |
 | `PRIMO_EMBEDDING_RETRY_MAX_DELAY` | `65.0` | Cap in seconds on the wait honoured from the server's `Retry-After`/`RetryInfo` advice |
 | `PRIMO_LIBRARIAN_LLM_FALLBACK` | `false` | Enable the tier-3 LLM reasoning fallback (runs only when keyword and embedding tiers both miss) |
-| `PRIMO_LLM_PROVIDER` | `sampling` | `sampling` runs on the connected MCP client's own model (no key, no endpoint); `openai` uses the settings below |
+| `PRIMO_LLM_PROVIDER` | `caller` | `caller` asks the calling model to route and validates its choice via `primo_submit_librarian_choice`; `sampling` uses MCP sampling; `openai` uses the settings below |
 | `PRIMO_LLM_MAX_TOKENS` | `512` | Token budget for the reasoning completion |
 | `PRIMO_LLM_URL` | `http://localhost:11434/v1` | OpenAI-compatible chat-completions endpoint (Ollama, LM Studio, vLLM, OpenAI, OpenRouter, Gemini OpenAI-compat) |
 | `PRIMO_LLM_MODEL` | `gemma3:4b` | Model used for the reasoning tier |
 | `PRIMO_LLM_API_KEY` | unset | Bearer token for the endpoint above; kept separate from `PRIMO_EMBEDDING_API_KEY` |
 | `PRIMO_LLM_TIMEOUT` | `20.0` | HTTP timeout for the reasoning call in seconds |
 | `PRIMO_LIBRARIAN_LLM_MIN_CONFIDENCE` | `0.6` | Floor on the model's self-reported confidence; a coarse gate, not a calibrated threshold |
-| `PRIMO_LIBRARIAN_LLM_INLINE` | `false` | Allow the reasoning tier on inline `primo_search` recommendations |
+| `PRIMO_LIBRARIAN_LLM_INLINE` | `true` | Allow the reasoning tier on inline `primo_search` recommendations (free for the `caller` backend; set false for backends that call out) |
 
 See `.env.example` for a commented template.
 
@@ -330,15 +331,26 @@ Set `PRIMO_LIBRARIAN_LLM_FALLBACK=true` to add a third tier that asks a model
 to reason about that gap. It runs **only when the first two tiers return
 nothing**, so the cost falls on a miss, never on a hit.
 
-Two backends, selected with `PRIMO_LLM_PROVIDER`:
+Three backends, selected with `PRIMO_LLM_PROVIDER`:
 
-- **`sampling`** (default) uses [MCP sampling](https://modelcontextprotocol.io/docs/concepts/sampling):
+- **`caller`** (default) hands the decision to the model already calling
+  this server. When keyword matching finds no librarian, the output prints
+  the configured directory and asks the caller to reason about it, then to
+  submit its choice to `primo_submit_librarian_choice` — which re-applies
+  every validation rule in code before anything can be shown. Same two-step
+  shape as `primo_rag_retrieve`/`primo_rag_validate`: the model reasons in
+  the middle, code decides what may be displayed. No API key, no endpoint,
+  no sampling support required, and no server-side latency — which is why
+  this backend is safe to run inline on ordinary searches.
+- **`sampling`** uses [MCP sampling](https://modelcontextprotocol.io/docs/concepts/sampling):
   the server asks the connected client to run the completion on the model
   already driving the conversation. No API key, no second endpoint, nothing
   extra to keep alive. Sampling is an optional part of the protocol, so a
   client may not implement it or may decline a request; either surfaces as a
   tier error and the recommendation degrades to the earlier tiers. The
   offline eval harness has no client session and must use `openai`.
+  Note: Claude Code answers sampling requests with `METHOD_NOT_FOUND`, so
+  `caller` is the working option for that client.
 - **`openai`** points `PRIMO_LLM_URL` / `PRIMO_LLM_MODEL` at any
   OpenAI-compatible chat-completions endpoint (Ollama, LM Studio, vLLM,
   OpenAI, OpenRouter, or Gemini's OpenAI-compatible endpoint).
@@ -355,10 +367,10 @@ confidence** — deliberately named, since unlike a cosine it is not comparable
 across queries and is never fed into the embedding tier's self-calibrating
 threshold.
 
-It stays off the inline `primo_search` path by default, where
-recommendations ride on every search and must stay inside a ~2.5s budget;
-the explicit `primo_recommend_librarians` tool always runs it. Set
-`PRIMO_LIBRARIAN_LLM_INLINE=true` to allow it inline too.
+With the `caller` backend the tier runs inline by default, since it makes
+no network call of its own. Set `PRIMO_LIBRARIAN_LLM_INLINE=false` when
+using `openai` or `sampling`, whose round trip would push inline
+recommendations past their ~2.5s budget.
 
 When `PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS=true` and a configured profile
 meets the score threshold, `primo_search` puts a Markdown section headed

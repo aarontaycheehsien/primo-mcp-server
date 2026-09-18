@@ -80,6 +80,11 @@ class LlmFallbackResult(NamedTuple):
     matches: list[LibrarianMatch]
     error: str | None = None
     skipped: str | None = None
+    # Set by the "caller" backend instead of matches: the routing task,
+    # addressed to the model already calling this server. It is a request
+    # for a decision, never a recommendation -- nothing may be shown to a
+    # user until primo_submit_librarian_choice has validated it.
+    routing_request: str | None = None
 
 
 def _error_label(e: Exception) -> str:
@@ -224,7 +229,24 @@ def parse_choices(
     choices = payload.get("choices") or []
     if not isinstance(choices, list):
         raise ValueError("'choices' is not a list")
+    return validate_choices(choices, directory, query, config, limit=limit)
 
+
+def validate_choices(
+    choices: list,
+    directory: LibrarianDirectory,
+    query: str,
+    config: PrimoConfig,
+    *,
+    limit: int,
+) -> list[LibrarianMatch]:
+    """Validate already-parsed choices into matches.
+
+    Shared by every routing backend -- an HTTP completion, MCP sampling,
+    and the caller-reasoned path -- so the closed-vocabulary, deny-list and
+    evidence rules are enforced in exactly one place regardless of which
+    model did the reasoning.
+    """
     by_id = {profile.id: profile for profile in directory.librarians}
     matches: list[LibrarianMatch] = []
     seen: set[str] = set()
@@ -262,6 +284,50 @@ def parse_choices(
         )
     matches.sort(key=lambda match: -match.score)
     return matches[:limit]
+
+
+def build_routing_request(
+    directory: LibrarianDirectory,
+    query: str,
+    records: list[PrimoRecord] | None,
+    *,
+    limit: int,
+) -> str:
+    """Hand the routing decision to the model already calling this server.
+
+    The "caller" backend makes no network call of its own: it prints the
+    directory and asks the caller to reason, then to submit its choice to
+    ``primo_submit_librarian_choice``, which re-applies every validation
+    rule in code. That keeps the closed-vocabulary invariant intact while
+    using the model that is already in the loop -- so the tier costs the
+    server no latency, and works on clients that implement no sampling.
+
+    The same two-step shape as primo_rag_retrieve/primo_rag_validate: the
+    model reasons in the middle, code decides what may be shown.
+    """
+    profiles = directory.librarians[:_MAX_PROMPT_PROFILES]
+    lines = [
+        _profile_line(i, profile) for i, profile in enumerate(profiles, start=1)
+    ]
+    return (
+        "Caller action -- librarian routing needed: keyword matching found "
+        f'no librarian for "{query}". Decide whether any configured profile '
+        "below genuinely covers this subject, judging by expertise rather "
+        "than word overlap.\n\n"
+        "Configured profiles:\n"
+        + "\n".join(lines)
+        + "\n\n"
+        "If one or more genuinely fit, call primo_submit_librarian_choice "
+        f'with query="{query}" and up to {limit} choices, each giving the '
+        "exact id, your confidence (0-1), and a one-sentence reason naming "
+        "the expertise that fits. That tool re-checks every id against the "
+        "directory and is the ONLY way a librarian may be shown -- do not "
+        "name a librarian in your reply that it has not returned.\n"
+        "If none genuinely fit, do not call it: say no configured librarian "
+        "covers this topic and offer primo_list_librarians as directory "
+        "information. An empty answer is correct and expected for a subject "
+        "outside the directory's coverage."
+    )
 
 
 def sampling_reasoner(session, *, config: PrimoConfig, related_request_id=None) -> Reasoner:
@@ -357,7 +423,16 @@ async def llm_fallback(
     if not directory.librarians:
         return LlmFallbackResult([], skipped="the librarian directory is empty")
 
-    if reasoner is None and config.llm_provider.strip().lower() == "sampling":
+    provider = config.llm_provider.strip().lower()
+    if reasoner is None and provider == "caller":
+        return LlmFallbackResult(
+            [],
+            routing_request=build_routing_request(
+                directory, query, records, limit=limit
+            ),
+        )
+
+    if reasoner is None and provider == "sampling":
         # Sampling needs the live client session, which only the server can
         # supply. Reaching here without one means a non-server caller (the
         # offline eval harness) is configured for sampling; say so rather

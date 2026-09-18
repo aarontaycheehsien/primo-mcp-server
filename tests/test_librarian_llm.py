@@ -486,3 +486,73 @@ async def test_other_protocol_errors_keep_their_code_and_message():
     )
 
     assert result.error == "McpError -32603: Internal error"
+
+
+# ---------------------------------------------------------------------------
+# Caller-reasoned backend: the model already calling the server decides.
+# ---------------------------------------------------------------------------
+
+
+async def test_caller_backend_returns_a_routing_request_not_a_match():
+    """No network call: the tier hands the decision back to the caller."""
+    result = await llm_fallback(
+        _directory(), "seafood", None, _config(llm_provider="caller")
+    )
+
+    assert result.matches == []
+    assert result.error is None
+    request = result.routing_request
+    assert request is not None
+    assert "id=psych" in request and "id=law" in request
+    assert "primo_submit_librarian_choice" in request
+    # The caller must not name a librarian the validator has not returned.
+    assert "do not" in request.lower()
+    assert "An empty answer is correct" in request
+
+
+async def test_caller_backend_makes_no_http_call():
+    import respx
+
+    with respx.mock:
+        route = respx.post("http://localhost:11434/v1/chat/completions")
+        await llm_fallback(
+            _directory(), "seafood", None, _config(llm_provider="caller")
+        )
+        assert route.call_count == 0
+
+
+def test_validate_choices_enforces_the_same_rules_as_the_other_backends():
+    """The validator is the single enforcement point for every backend."""
+    from primo_mcp_server.librarian_llm import validate_choices
+
+    matches = validate_choices(
+        [
+            {"id": "ghost", "confidence": 0.99, "reason": "invented"},
+            {"id": "law", "confidence": 0.99, "reason": "excluded by curator"},
+            {"id": "psych", "confidence": 0.2, "reason": "below floor"},
+            {"id": "psych", "confidence": 0.88, "reason": "behavioural science"},
+        ],
+        _directory(),
+        "autism",
+        _config(),
+        limit=3,
+    )
+
+    assert [m.librarian.id for m in matches] == ["psych"]
+    assert matches[0].matched_terms == ["behavioural science"]
+    assert matches[0].evidence_fields == ["llm"]
+
+
+def test_validate_choices_rejects_everything_when_nothing_qualifies():
+    from primo_mcp_server.librarian_llm import validate_choices
+
+    assert (
+        validate_choices(
+            [{"id": "ghost", "confidence": 1.0, "reason": "made up"}],
+            _directory(),
+            "autism",
+            _config(),
+            limit=3,
+        )
+        == []
+    )

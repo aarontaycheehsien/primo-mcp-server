@@ -746,3 +746,77 @@ async def test_unexpected_tool_error_is_logged_with_traceback(caplog):
         r for r in caplog.records if "Unexpected error in primo_search" in r.message
     )
     assert record.exc_info is not None
+
+
+# ---------------------------------------------------------------------------
+# Caller-reasoned librarian routing (tier 3, "caller" backend).
+# ---------------------------------------------------------------------------
+
+
+def _routing_context(tmp_path):
+    return _fake_context(
+        config_overrides={
+            "librarians_file": _write_librarians_file(tmp_path),
+            "librarian_llm_fallback": True,
+            "llm_provider": "caller",
+            # Force a keyword miss so the routing tier engages.
+            "librarian_min_score": 10_000.0,
+        }
+    )
+
+
+async def test_keyword_miss_asks_the_caller_to_route(tmp_path):
+    from primo_mcp_server.server import primo_recommend_librarians
+
+    output = await primo_recommend_librarians(
+        _routing_context(tmp_path), "deep sea fishing quotas"
+    )
+
+    assert "Status: no_match" in output
+    assert "librarian routing needed" in output
+    assert "id=accounting" in output and "id=data" in output
+    assert "primo_submit_librarian_choice" in output
+
+
+async def test_submitted_choice_is_validated_and_formatted(tmp_path):
+    from primo_mcp_server.server import primo_submit_librarian_choice
+
+    output = await primo_submit_librarian_choice(
+        _routing_context(tmp_path),
+        "audit datasets",
+        [{"id": "accounting", "confidence": 0.88, "reason": "covers audit data"}],
+    )
+
+    assert "Status: matched (LLM reasoning)" in output
+    assert "Accounting Librarian" in output
+    assert "covers audit data" in output
+    assert "self-reported confidence 0.88" in output
+
+
+async def test_submitting_an_invented_id_names_no_librarian(tmp_path):
+    """The gate: a fabricated id must never come back as a recommendation."""
+    from primo_mcp_server.server import primo_submit_librarian_choice
+
+    output = await primo_submit_librarian_choice(
+        _routing_context(tmp_path),
+        "deep sea fishing quotas",
+        [{"id": "marine-biology", "confidence": 0.95, "reason": "invented"}],
+    )
+
+    assert "No submitted choice passed validation" in output
+    assert "marine-biology" not in output
+    assert "Status: matched" not in output
+    # The caller is told what it may do instead of naming someone.
+    assert "primo_list_librarians" in output
+
+
+async def test_submission_without_a_directory_cannot_invent_one():
+    from primo_mcp_server.server import primo_submit_librarian_choice
+
+    output = await primo_submit_librarian_choice(
+        _fake_context(),
+        "anything",
+        [{"id": "accounting", "confidence": 0.9, "reason": "x"}],
+    )
+
+    assert "Librarian directory unavailable" in output

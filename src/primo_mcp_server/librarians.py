@@ -984,6 +984,7 @@ def format_librarian_recommendations(
     near_misses: Sequence[LibrarianMatch] = (),
     llm_error: str | None = None,
     llm_skipped: str | None = None,
+    llm_routing_request: str | None = None,
 ) -> str:
     """Format librarian recommendations for MCP responses.
 
@@ -1053,6 +1054,13 @@ def format_librarian_recommendations(
             lines.append(error_note)
         if llm_note:
             lines.append(llm_note)
+        if llm_routing_request:
+            # Status stays no_match: this is a task for the caller, not a
+            # recommendation. Nothing here may be shown to a user until
+            # primo_submit_librarian_choice has validated a choice.
+            lines.append("")
+            lines.append(llm_routing_request)
+            return "\n".join(lines)
         if near_misses:
             lines.append(
                 "Closest configured profiles (scored below the confidence "

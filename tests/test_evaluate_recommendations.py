@@ -349,13 +349,31 @@ async def test_llm_tier_is_skipped_on_the_latency_sensitive_inline_path(monkeypa
         _llm_directory(),
         "autism",
         [],
-        _llm_config(librarian_min_score=10_000.0),
+        _llm_config(librarian_min_score=10_000.0, librarian_llm_inline=False),
         embedding_timeout=2.5,
     )
 
     assert calls == []
     assert outcome.llm_skipped is not None
     assert "primo_recommend_librarians" in outcome.llm_skipped
+
+
+async def test_llm_tier_runs_inline_by_default(monkeypatch):
+    """The caller backend makes no network call, so inline costs nothing."""
+    from primo_mcp_server.librarian_llm import LlmFallbackResult
+
+    calls: list[str] = []
+    _patch_llm(monkeypatch, LlmFallbackResult([]), spy=calls)
+
+    await recommend_with_fallback(
+        _llm_directory(),
+        "autism",
+        [],
+        _llm_config(librarian_min_score=10_000.0),
+        embedding_timeout=2.5,
+    )
+
+    assert calls == ["autism"]
 
 
 async def test_llm_tier_runs_inline_when_explicitly_opted_in(monkeypatch):

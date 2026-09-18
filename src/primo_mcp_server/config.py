@@ -139,15 +139,17 @@ class PrimoConfig(BaseSettings):
     # shares no vocabulary with any profile. Off by default: it costs a
     # model call, and the first two tiers answer the common cases.
     librarian_llm_fallback: bool = False
-    # "sampling" asks the connected MCP client to run the completion on the
-    # model already driving the conversation -- no API key, no second
-    # endpoint, no cost to the server operator. Requires a client that
-    # implements MCP sampling; when it does not, the tier reports an error
-    # and the recommendation degrades to the earlier tiers. "openai" uses
-    # llm_url/llm_model/llm_api_key instead, and is the only option
-    # available to non-server callers such as the offline eval harness,
-    # which has no client session.
-    llm_provider: str = "sampling"
+    # "caller" (default) hands the routing decision to the model already
+    # calling this server: the tier prints the directory and asks it to
+    # submit a choice to primo_submit_librarian_choice, which re-applies
+    # every validation rule in code. No API key, no endpoint, no sampling
+    # support needed, and no server-side latency -- which is why this
+    # backend is safe to run inline on ordinary searches.
+    # "sampling" asks the client to run the completion itself via MCP
+    # sampling; clients that do not implement it answer METHOD_NOT_FOUND.
+    # "openai" uses llm_url/llm_model/llm_api_key, and is the only option
+    # for non-server callers such as the offline eval harness.
+    llm_provider: str = "caller"
     llm_max_tokens: int = 512
     # Any OpenAI-compatible chat-completions endpoint: Ollama, LM Studio,
     # vLLM, OpenAI, OpenRouter, or Gemini's OpenAI-compatible endpoint.
@@ -163,11 +165,12 @@ class PrimoConfig(BaseSettings):
     # across queries or models, which is why it is kept out of the
     # embedding path's self-calibrating mean+margin rule.
     librarian_llm_min_confidence: float = 0.6
-    # Whether the LLM tier may run on the inline primo_search path. Off by
-    # default: inline recommendations ride on every ordinary search and must
-    # stay within a ~2.5s budget, while an explicit primo_recommend_librarians
-    # call is a user asking for a referral and can afford a model round trip.
-    librarian_llm_inline: bool = False
+    # Whether the LLM tier may run on the inline primo_search path. On by
+    # default because the "caller" backend makes no network call of its own,
+    # so it costs the search nothing; set it false (or use a backend that
+    # does call out, such as "openai") when the round trip would push inline
+    # recommendations past their ~2.5s budget.
+    librarian_llm_inline: bool = True
     # Optional Matryoshka truncation (e.g. 768) to cut cache size and latency.
     # gemini-embedding-001 degrades little when truncated; cosine scoring
     # renormalises, so no extra normalisation step is needed. Changing this

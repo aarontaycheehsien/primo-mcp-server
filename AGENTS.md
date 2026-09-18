@@ -26,7 +26,7 @@ This is the canonical agent guidance file for this fork.
 - `src/primo_mcp_server/exporters.py` -- BibTeX, RIS, CSV export
 - `src/primo_mcp_server/librarians.py` -- Librarian directory loading and keyword recommendation matching
 - `src/primo_mcp_server/librarian_embeddings.py` -- Optional Gemini embedding semantic fallback for recommendations (per-term vectors, max cosine per profile)
-- `src/primo_mcp_server/librarian_llm.py` -- Optional tier-3 LLM reasoning fallback (closed-vocabulary, evidence-bearing; runs only when keyword and embedding tiers both miss)
+- `src/primo_mcp_server/librarian_llm.py` -- Optional tier-3 LLM reasoning fallback (closed-vocabulary, evidence-bearing; runs only when keyword and embedding tiers both miss). `validate_choices` is the single enforcement point shared by the caller, sampling and openai backends
 - `src/primo_mcp_server/calibrate_embeddings.py` -- CLI for calibrating semantic fallback thresholds
 - `src/primo_mcp_server/profile_tools.py` -- Curator CLI: convert a CSV profile source to JSON and lint the directory
 - `src/primo_mcp_server/recommendation.py` -- Combined keyword + semantic + LLM recommendation pipeline (shared by the server and the evaluation harness)
@@ -74,9 +74,11 @@ score thresholds, margins, timeouts, and the query token gate):
   calibration CLI when switching models; the cosine floor was tuned for
   gemini-embedding-001.
 - PRIMO_LIBRARIAN_LLM_FALLBACK -- enable the tier-3 LLM reasoning fallback
-  (default false); PRIMO_LLM_URL / PRIMO_LLM_MODEL / PRIMO_LLM_API_KEY set
-  the OpenAI-compatible endpoint, and PRIMO_LIBRARIAN_LLM_INLINE lets it
-  run on inline searches (default false)
+  (default false). PRIMO_LLM_PROVIDER picks the backend: "caller" (default,
+  the calling model routes and primo_submit_librarian_choice validates),
+  "sampling" (MCP sampling), or "openai" (PRIMO_LLM_URL / PRIMO_LLM_MODEL /
+  PRIMO_LLM_API_KEY). PRIMO_LIBRARIAN_LLM_INLINE (default true) allows it on
+  inline searches -- free for "caller", a round trip for the others
 
 ## Search Scope Policy
 
@@ -166,11 +168,21 @@ The tier is constrained in code, not by prompt alone:
   the explicit `primo_recommend_librarians` tool unless
   `PRIMO_LIBRARIAN_LLM_INLINE=true`.
 
-`PRIMO_LLM_PROVIDER` selects the backend. `sampling` (the default) asks the
+`PRIMO_LLM_PROVIDER` selects the backend. `caller` (the default) makes no
+model call at all: it prints the directory as a routing request addressed
+to the model already calling the server, which reasons and then submits its
+choice to `primo_submit_librarian_choice`. That tool runs `validate_choices`
+-- the single enforcement point shared by all three backends -- so the
+closed-vocabulary, deny-list, evidence and confidence rules apply no matter
+which model reasoned. Because nothing is called out to, this backend costs
+an inline search nothing and runs inline by default.
+
+`sampling` asks the
 connected MCP client to run the completion on the model already driving the
 conversation -- no key, no endpoint, no extra quota -- and needs the live
 session, so only the server can supply it; the offline eval harness has none
-and must use `openai`. `openai` reaches any OpenAI-compatible
+and must use `openai`. Claude Code answers sampling requests with
+METHOD_NOT_FOUND, so `caller` is the working option there. `openai` reaches any OpenAI-compatible
 chat-completions endpoint, with `llm_api_key` separate from
 `embedding_api_key` so a Gemini key can never travel to it.
 

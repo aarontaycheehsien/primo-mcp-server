@@ -28,8 +28,13 @@ from primo_mcp_server.formatter import (
     search_query_label,
 )
 from primo_mcp_server.librarian_embeddings import warm_up_local_embedder
-from primo_mcp_server.librarian_llm import Reasoner, sampling_reasoner
+from primo_mcp_server.librarian_llm import (
+    Reasoner,
+    sampling_reasoner,
+    validate_choices,
+)
 from primo_mcp_server.librarians import (
+    _MAX_RECOMMENDATIONS,
     LibrarianMatch,
     format_librarian_directory,
     format_librarian_recommendations,
@@ -316,6 +321,7 @@ async def _format_recommendations_for_records(
             near_misses=outcome.near_misses,
             llm_error=outcome.llm_error,
             llm_skipped=outcome.llm_skipped,
+            llm_routing_request=outcome.llm_routing_request,
         ),
         matches=outcome.matches,
         near_misses=outcome.near_misses,
@@ -629,6 +635,72 @@ async def primo_recommend_librarians(
         reasoner=_reasoner_for(ctx, config),
     )
     return recommendation.text
+
+
+# ---------------------------------------------------------------------------
+# Tool: primo_submit_librarian_choice
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+@_tool_error_boundary("validating librarian choice")
+async def primo_submit_librarian_choice(
+    ctx: Context,
+    query: str,
+    choices: list[dict],
+) -> str:
+    """Validate a reasoned librarian choice and format it for the user.
+
+    Step 2 of the caller-reasoned routing tier. When keyword matching finds
+    no librarian, the recommendation output asks the calling model to
+    decide which configured profile fits; this tool is where that decision
+    is checked by code before anything can be shown.
+
+    Every rule the other matching paths obey is re-applied here: an id that
+    is not in the configured directory is discarded (never rendered under a
+    fabricated name), a curator deny-list still suppresses its profile, a
+    choice with no reason is dropped because evidence is mandatory, and a
+    confidence below the configured floor is rejected. Passing this tool is
+    the ONLY way a librarian from this tier may be named to a user.
+
+    Args:
+        query: The user's research topic, as given to the search that
+            produced the routing request.
+        choices: One object per librarian, each with "id" (exact id from
+            the configured directory), "confidence" (0-1, your own
+            estimate), and "reason" (one sentence naming the expertise
+            that fits).
+
+    Returns:
+        A validated, evidence-bearing recommendation, or a rejection
+        explaining which ids were not accepted and why.
+    """
+    config = _get_config(ctx)
+    directory, message, _ = load_librarian_directory_cached(
+        config.librarians_file
+    )
+    if message or directory is None:
+        return f"Librarian directory unavailable: {message}"
+
+    matches = validate_choices(
+        list(choices or []),
+        directory,
+        query,
+        config,
+        limit=_MAX_RECOMMENDATIONS,
+    )
+    if not matches:
+        known = ", ".join(profile.id for profile in directory.librarians)
+        return (
+            "No submitted choice passed validation, so no librarian may be "
+            f'shown for "{query}". Every choice was rejected as an unknown '
+            "id, a curator-excluded profile, a missing reason, or a "
+            "confidence below the configured floor "
+            f"({config.librarian_llm_min_confidence}). Configured ids: "
+            f"{known}. Do not name a librarian in your reply; say none "
+            "covers this topic, or offer primo_list_librarians as "
+            "directory information."
+        )
+    return format_librarian_recommendations(matches, query)
 
 
 # ---------------------------------------------------------------------------
