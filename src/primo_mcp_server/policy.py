@@ -56,6 +56,35 @@ ZERO_RESULT_GUIDANCE_LINES = [
     "and report the attempted queries.",
 ]
 
+SEARCH_TRANSPARENCY_POLICY_LINES = [
+    "Every user-facing answer built from primo_search MUST include a "
+    '"Queries attempted:" list naming each query actually run and the '
+    "number of results it returned.",
+    "List every attempt made in the turn, including attempts that returned "
+    "zero results and attempts that were later widened or abandoned -- not "
+    "just the attempt that worked.",
+    "Never present Primo results without saying how many results the search "
+    "returned; an unqualified list of hits hides how much was found.",
+]
+
+# Machine-readable counterpart to SEARCH_TRANSPARENCY_TEXT, surfaced as
+# structuredContent.search_transparency.caller_action so a caller that reads
+# metadata rather than prose still sees the obligation.
+SEARCH_TRANSPARENCY_CALLER_ACTION = "report_queries_attempted_with_result_counts"
+
+# Prepended to EVERY primo_search result, including zero-result ones. The
+# librarian referral banner uses the same shape; both exist because prose
+# policy in the tool description alone was too easy to skip once results
+# were in hand.
+SEARCH_TRANSPARENCY_TEXT = (
+    "## Required search transparency\n\n"
+    "Caller action: You MUST include, in the user-facing response, a "
+    '"Queries attempted:" list naming every query run in this turn and the '
+    "number of results each returned -- including attempts that returned "
+    "zero results. The list below covers this call only; combine it with "
+    "the other primo_search calls of this turn."
+)
+
 LIBRARIAN_POLICY_TEXT = (
     "Librarian recommendations are limited to configured profile IDs; do "
     "not invent or substitute names. When a search returns Status: matched, "
@@ -73,6 +102,8 @@ SEARCH_POLICY_TEXT = (
     + _bullets(SCOPE_POLICY_LINES)
     + "\n\nZero-result policy for callers:\n"
     + _bullets(ZERO_RESULT_POLICY_LINES)
+    + "\n\nSearch transparency policy for callers:\n"
+    + _bullets(SEARCH_TRANSPARENCY_POLICY_LINES)
 )
 
 SERVER_INSTRUCTIONS = (

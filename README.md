@@ -113,6 +113,7 @@ Recommended caller policy:
 - For catalogue searches with no results, retry with `scope="everything"` only when the user did not ask for catalogue-only results.
 - For any zero-result search, reason about why the query failed and try revised `primo_search` calls up to five total attempts. Good retries may broaden an over-specific phrase, use synonyms or related concepts, try singular/plural variants, switch fields, relax filters, widen scope when permitted, search directly for likely database names, or use OR queries for close alternatives.
 - When summarising an iterative search, combine all relevant results found across attempts and report the attempted queries.
+- Every user-facing answer must carry a `Queries attempted:` list naming each query run and the number of results it returned, including attempts that returned zero results. Every `primo_search` result is prefixed with a `## Required search transparency` banner and carries the same obligation as `search_transparency.caller_action` in its structured content.
 - For access or subscription checks, use Primo results as the evidence source rather than websites or LibGuides.
 
 ## Compound Queries

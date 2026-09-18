@@ -136,7 +136,7 @@ async def test_primo_search_smoke_does_not_return_unexpected_error():
     output = _search_text(output)
 
     assert "Unexpected error" not in output
-    assert "Queries run:" in output
+    assert "Queries attempted:" in output
     assert "- Results found: [any,contains,ceo compensation](" in output
     assert "pcAvailability=true" in output
     assert "Executive Compensation Data" in output
@@ -231,6 +231,92 @@ async def test_primo_search_zero_results_guides_llm_iteration():
     assert "direct searches for likely database names" in output
     assert "OR queries for close alternatives" in output
     assert "combine all relevant results found across attempts" in output
+
+
+async def test_primo_search_always_demands_queries_attempted_and_counts():
+    """The transparency banner and count block ride on every hit search."""
+    result = await primo_search(
+        _fake_context(),
+        "ceo compensation",
+        scope="catalogue",
+        recommend_librarians=False,
+    )
+    output = _search_text(result)
+
+    assert output.startswith("## Required search transparency")
+    assert '"Queries attempted:" list naming every query run' in output
+    assert "number of results each returned" in output
+    assert "Queries attempted:" in output
+    assert "- Results found: [any,contains,ceo compensation](" in output
+    assert "-- 1 result" in output
+
+
+async def test_zero_result_search_still_reports_the_attempt_and_count():
+    """A miss is the attempt most worth reporting, so it carries the block too."""
+    result = await primo_search(
+        _fake_context(client=_FakeClient(records=[])),
+        "autism",
+        resource_type="databases",
+        recommend_librarians=False,
+    )
+    output = _search_text(result)
+
+    assert output.startswith("## Required search transparency")
+    assert "Queries attempted:" in output
+    assert "- No results: [any,contains,autism](" in output
+    assert "-- 0 results" in output
+
+
+async def test_search_transparency_is_exposed_as_structured_metadata():
+    """A caller reading metadata rather than prose sees the same obligation."""
+    result = await primo_search(
+        _fake_context(),
+        "ceo compensation",
+        scope="catalogue",
+        recommend_librarians=False,
+    )
+
+    transparency = result.structuredContent["search_transparency"]
+    assert transparency["caller_action"] == (
+        "report_queries_attempted_with_result_counts"
+    )
+    assert transparency["total_results"] == 1
+    attempted = transparency["queries_attempted"]
+    assert len(attempted) == 1
+    assert attempted[0]["query"] == "any,contains,ceo compensation"
+    assert attempted[0]["results"] == 1
+    assert "any%2Ccontains%2Cceo+compensation" in attempted[0]["url"]
+
+
+async def test_transparency_survives_the_librarian_referral_prepend(tmp_path):
+    """The librarian banner may lead, but the counts must not be dropped."""
+    result = await primo_search(
+        _fake_context(
+            config_overrides={"librarians_file": _write_librarians_file(tmp_path)}
+        ),
+        "executive compensation",
+        scope="catalogue",
+    )
+    output = _search_text(result)
+
+    assert output.startswith("## Required librarian referral")
+    assert "## Required search transparency" in output
+    assert "Queries attempted:" in output
+    assert "-- 1 result" in output
+    assert result.structuredContent["search_transparency"]["total_results"] == 1
+
+
+def test_policy_text_states_the_transparency_obligation():
+    from primo_mcp_server.policy import (
+        PRIMO_SEARCH_DESCRIPTION,
+        SERVER_INSTRUCTIONS,
+    )
+
+    for text in (PRIMO_SEARCH_DESCRIPTION, SERVER_INSTRUCTIONS):
+        assert "Search transparency policy for callers:" in text
+        assert '"Queries attempted:" list' in text
+        assert "number of results it returned" in text
+        assert "including attempts that returned zero results" in text
 
 
 def test_primo_search_description_documents_dataset_database_first_policy():

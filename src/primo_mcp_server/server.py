@@ -21,9 +21,11 @@ from primo_mcp_server.client import PrimoAPIError, PrimoClient
 from primo_mcp_server.config import PrimoConfig
 from primo_mcp_server.exporters import export_bibtex, export_csv, export_ris
 from primo_mcp_server.formatter import (
+    build_search_url,
     format_record_detail,
     format_search_results,
     format_suggestions,
+    search_query_label,
 )
 from primo_mcp_server.librarian_embeddings import warm_up_local_embedder
 from primo_mcp_server.librarians import (
@@ -34,7 +36,11 @@ from primo_mcp_server.librarians import (
     load_librarian_directory_cached,
     looks_like_identifier,
 )
-from primo_mcp_server.policy import PRIMO_SEARCH_DESCRIPTION, SERVER_INSTRUCTIONS
+from primo_mcp_server.policy import (
+    PRIMO_SEARCH_DESCRIPTION,
+    SEARCH_TRANSPARENCY_CALLER_ACTION,
+    SERVER_INSTRUCTIONS,
+)
 from primo_mcp_server.query import QueryClause
 from primo_mcp_server.rag_guard import (
     RagSessionStore,
@@ -93,11 +99,36 @@ def _match_payload(match: LibrarianMatch) -> dict:
     }
 
 
+def _transparency_payload(
+    query_label: str, result_count: int, search_url: str | None
+) -> dict:
+    """Machine-readable twin of the "Queries attempted:" text block.
+
+    Covers this call only; the caller is told (in prose and here) to
+    combine it across every primo_search call of the turn.
+    """
+    return {
+        "caller_action": SEARCH_TRANSPARENCY_CALLER_ACTION,
+        "queries_attempted": [
+            {
+                "query": query_label,
+                "results": result_count,
+                "url": search_url,
+            }
+        ],
+        "total_results": result_count,
+    }
+
+
 def _search_tool_result(
-    text: str, recommendation: FormattedRecommendation | None = None
+    text: str,
+    recommendation: FormattedRecommendation | None = None,
+    transparency: dict | None = None,
 ) -> CallToolResult:
     """Return readable text plus explicit, evidence-bearing MCP metadata."""
     structured: dict[str, object] = {"result": text}
+    if transparency is not None:
+        structured["search_transparency"] = transparency
     if recommendation is not None:
         structured.update(
             {
@@ -391,7 +422,28 @@ async def primo_search(
                 )
             else:
                 result += "\n\n" + recommendation.text
-        return _search_tool_result(result, recommendation)
+        return _search_tool_result(
+            result,
+            recommendation,
+            _transparency_payload(
+                search_query_label(query, field, clauses),
+                response.info.total,
+                build_search_url(
+                    query,
+                    config,
+                    field=field,
+                    scope=scope,
+                    sort_by=sort_by,
+                    offset=offset,
+                    resource_type=resource_type,
+                    date_from=date_from,
+                    date_to=date_to,
+                    peer_reviewed=peer_reviewed,
+                    include_unavailable=include_unavailable,
+                    clauses=clauses,
+                ),
+            ),
+        )
     except PrimoAPIError as e:
         return _search_tool_result(f"Error searching Primo: {e}")
     except Exception as e:

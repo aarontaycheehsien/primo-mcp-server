@@ -6,7 +6,10 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlencode
 
 from primo_mcp_server.models import PrimoRecord, SearchResponse
-from primo_mcp_server.policy import ZERO_RESULT_GUIDANCE_LINES
+from primo_mcp_server.policy import (
+    SEARCH_TRANSPARENCY_TEXT,
+    ZERO_RESULT_GUIDANCE_LINES,
+)
 from primo_mcp_server.query import (
     QueryClause,
     date_range_facet_value,
@@ -242,17 +245,42 @@ def _markdown_link_text(text: str) -> str:
     return text.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
 
 
+def search_query_label(
+    query: str,
+    field: str = "any",
+    clauses: list[QueryClause | dict] | None = None,
+) -> str:
+    """Render the Primo query actually sent, for transparency reporting.
+
+    Shared by the text formatter and the server's structured output so the
+    label a caller repeats back always matches the query that ran.
+    """
+    try:
+        if clauses:
+            return ";".join(query_clause_parts(clauses))
+        return f"{normalise_search_field(field)},contains,{query}"
+    except ValueError:
+        return f"{field},contains,{query}"
+
+
 def _format_query_links(
     query_label: str,
     search_url: str | None,
     *,
-    has_results: bool,
+    result_count: int,
 ) -> list[str]:
-    if not search_url:
-        return []
-    result_label = "Results found" if has_results else "No results"
+    """Render the mandatory "Queries attempted:" block.
+
+    Emitted for every search, with or without a linkable search URL and
+    with or without hits: a caller cannot report what it was never shown,
+    so this block never collapses to nothing.
+    """
+    result_label = "Results found" if result_count else "No results"
+    plural = "" if result_count == 1 else "s"
+    count = f"{result_count:,} result{plural}"
     label = _markdown_link_text(query_label)
-    return ["Queries run:", f"- {result_label}: [{label}]({search_url})", ""]
+    target = f"[{label}]({search_url})" if search_url else label
+    return ["Queries attempted:", f"- {result_label}: {target} -- {count}", ""]
 
 
 # Facets shown in the "Result landscape" section, in display order. Other
@@ -367,22 +395,18 @@ def format_search_results(
         include_unavailable=include_unavailable,
         clauses=clauses,
     )
-    try:
-        query_label = (
-            ";".join(query_clause_parts(clauses))
-            if clauses
-            else f"{normalise_search_field(field)},contains,{query}"
-        )
-    except ValueError:
-        query_label = f"{field},contains,{query}"
+    query_label = search_query_label(query, field, clauses)
     query_links = _format_query_links(
         query_label,
         search_url,
-        has_results=bool(response.records),
+        result_count=response.info.total,
     )
+    # The transparency banner leads every search result, hit or miss, so the
+    # obligation is in front of the caller before the results are.
+    banner = [SEARCH_TRANSPARENCY_TEXT, ""]
 
     if not response.records:
-        lines = [f'No results found for "{query}".', ""]
+        lines = [*banner, f'No results found for "{query}".', ""]
         lines.extend(query_links)
         lines.extend(
             [
@@ -403,6 +427,7 @@ def format_search_results(
     showing_end = offset + len(response.records)
 
     lines = [
+        *banner,
         f'Found {total} results for "{query}" (showing {showing_start}-{showing_end})',
         "",
     ]

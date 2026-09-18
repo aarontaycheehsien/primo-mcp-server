@@ -45,7 +45,7 @@ class TestFormatSearchResults:
         response = SearchResponse.from_api_response(empty_results_data)
         output = format_search_results(response, "xyzzyplugh99999", config=_smu_config())
         assert "No results found" in output
-        assert "Queries run:" in output
+        assert "Queries attempted:" in output
         assert "- No results: [any,contains,xyzzyplugh99999](" in output
         assert "Suggestions" in output
         assert "Iterative search guidance:" in output
@@ -55,7 +55,32 @@ class TestFormatSearchResults:
         assert "direct searches for likely database names" in output
         assert "OR queries for close alternatives" in output
         assert "combine all relevant results found across attempts" in output
-        assert output.index("Queries run:") < output.index("Suggestions")
+        assert output.index("Queries attempted:") < output.index("Suggestions")
+
+    def test_queries_attempted_block_survives_a_missing_search_url(
+        self, search_results_data
+    ):
+        """Without config there is no link, but the attempt still gets reported."""
+        response = SearchResponse.from_api_response(search_results_data)
+        output = format_search_results(response, "test")
+
+        assert output.startswith("## Required search transparency")
+        assert "Queries attempted:" in output
+        assert "- Results found: any,contains,test --" in output
+        assert "http" not in output.split("[1]")[0]
+
+    def test_queries_attempted_reports_the_full_total_not_the_page_size(self):
+        """The count is Primo's total, not the handful of records shown."""
+        response = SearchResponse.model_validate(
+            {
+                "info": {"total": 1234},
+                "records": [{"record_id": "alma1", "title": "Only shown record"}],
+            }
+        )
+        output = format_search_results(response, "inflation", config=_smu_config())
+
+        assert "- Results found: [any,contains,inflation](" in output
+        assert "-- 1,234 results" in output
 
     def test_contains_record_ids(self, search_results_data):
         response = SearchResponse.from_api_response(search_results_data)
@@ -72,7 +97,7 @@ class TestFormatSearchResults:
         response = SearchResponse.from_api_response(search_results_data)
         output = format_search_results(response, config=_smu_config())
         assert "Found" in output
-        assert "Queries run:" in output
+        assert "Queries attempted:" in output
         assert "- Results found: [any,contains,](" in output
 
     def test_keeps_plain_titles_without_config(self, search_results_data):
@@ -88,9 +113,9 @@ class TestFormatSearchResults:
         record = response.records[0]
         output = format_search_results(response, "test", config=_smu_config())
 
-        assert "Queries run:" in output
+        assert "Queries attempted:" in output
         assert "- Results found: [any,contains,test](" in output
-        assert output.index("Queries run:") < output.index("[1]")
+        assert output.index("Queries attempted:") < output.index("[1]")
         assert f"[1] [{record.title}](" in output
         assert "Berger, Elisabeth S.C." in output
         assert "| 2021 | Article" in output

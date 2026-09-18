@@ -16,7 +16,7 @@ This is the canonical agent guidance file for this fork.
 ## Key Files
 
 - `src/primo_mcp_server/server.py` -- MCP tool definitions and lifespan
-- `src/primo_mcp_server/policy.py` -- Single source of truth for the caller-facing scope and zero-result policy prose (server instructions, primo_search description, and zero-result output are all composed from it)
+- `src/primo_mcp_server/policy.py` -- Single source of truth for the caller-facing scope, zero-result, and search-transparency policy prose (server instructions, primo_search description, and zero-result output are all composed from it)
 - `src/primo_mcp_server/client.py` -- Primo API HTTP client
 - `src/primo_mcp_server/config.py` -- pydantic-settings configuration (PRIMO_ env prefix)
 - `src/primo_mcp_server/query.py` -- scope, field, sort, and resource type alias normalisation
@@ -105,6 +105,21 @@ widen scope when permitted. Retries may also search directly for likely
 database names or use OR queries for close alternatives. When summarising,
 combine all relevant results found across attempts and report the attempted
 queries.
+
+## Search Transparency Policy
+
+Every user-facing answer built from `primo_search` must include a
+`Queries attempted:` list naming each query actually run and the number of
+results it returned -- including attempts that returned zero results and
+attempts that were later widened or abandoned. Results must never be
+presented without their count.
+
+The obligation is enforced in three places, all composed from
+`policy.py`: the `## Required search transparency` banner that
+`format_search_results` prepends to every result (hit or miss), the
+`Queries attempted:` block carrying each query's result count, and
+`search_transparency.caller_action` in the structured content. The banner
+covers one call; the caller combines it across the turn.
 
 ## Librarian Recommendation Policy
 
