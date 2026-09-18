@@ -15,6 +15,7 @@ from primo_mcp_server.config import PrimoConfig
 from primo_mcp_server.models import Facet, PrimoRecord, SearchResponse
 from primo_mcp_server.query import (
     QueryClause,
+    compile_facet_filters,
     compile_query_clauses,
     date_range_facet_value,
     normalise_resource_type,
@@ -31,10 +32,24 @@ def _normalise_alma_id(record_id: str) -> str:
 
 
 class PrimoAPIError(Exception):
-    """Raised when the Primo API returns an error."""
+    """Raised when the Primo API returns an error.
 
-    def __init__(self, message: str, status_code: int | None = None):
+    ``transient`` marks failures worth retrying (timeouts, connection
+    failures, HTTP 429/5xx); ``retry_after`` carries the server's numeric
+    Retry-After advice in seconds when it sent one.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        status_code: int | None = None,
+        *,
+        transient: bool = False,
+        retry_after: float | None = None,
+    ):
         self.status_code = status_code
+        self.transient = transient
+        self.retry_after = retry_after
         super().__init__(message)
 
 
@@ -74,6 +89,13 @@ def _date_range_facet_value(date_from: str | None, date_to: str | None) -> str |
 def _compile_query_clauses(clauses: list[QueryClause | dict]) -> str:
     """Compile compound query clauses into Primo's multi-clause q syntax."""
     return _normalise_parameter(compile_query_clauses, clauses)
+
+
+def _compile_facet_filters(
+    filters: dict[str, str] | None, label: str
+) -> list[str]:
+    """Compile a {facet: value} mapping into qInclude/qExclude parts."""
+    return _normalise_parameter(compile_facet_filters, filters, label)
 
 
 class PrimoClient:
@@ -184,6 +206,8 @@ class PrimoClient:
         include_unavailable: bool | None = None,
         include_facets: bool | None = None,
         clauses: list[QueryClause | dict] | None = None,
+        facet_filters: dict[str, str] | None = None,
+        facet_exclusions: dict[str, str] | None = None,
     ) -> SearchResponse:
         """Search the Primo catalogue.
 
@@ -208,6 +232,13 @@ class PrimoClient:
             clauses: Optional compound query clauses. When given they
                 replace the single query/field pair as the retrieval query
                 and are compiled into Primo's multi-clause boolean syntax.
+            facet_filters: Optional {facet: value} refinements compiled into
+                Primo's qInclude parameter, e.g. {"topic": "Economics"}.
+                Facet names accept friendly aliases (subject, language,
+                journal, ...); values must match Primo's facet values
+                exactly, as reported in a previous search's facet summary.
+            facet_exclusions: Like facet_filters, but compiled into qExclude
+                so matching results are removed.
 
         Returns:
             SearchResponse with parsed records, pagination info, and any
@@ -262,10 +293,14 @@ class PrimoClient:
             q_include.append(f"facet_searchcreationdate,exact,{date_range}")
         if peer_reviewed:
             q_include.append("facet_tlevel,exact,peer_reviewed")
+        q_include.extend(_compile_facet_filters(facet_filters, "facet_filters"))
+        q_exclude = _compile_facet_filters(facet_exclusions, "facet_exclusions")
 
-        # Add all qInclude params
+        # Add all qInclude/qExclude params
         if q_include:
             params["qInclude"] = "|,|".join(q_include)
+        if q_exclude:
+            params["qExclude"] = "|,|".join(q_exclude)
 
         data = await self._get("/pnxs", params=params)
         response = SearchResponse.from_api_response(data)
@@ -482,7 +517,40 @@ class PrimoClient:
         return [record for record in results if record is not None]
 
     async def _get(self, path: str, params: dict[str, Any]) -> dict:
-        """Make a GET request to the Primo API."""
+        """GET from the Primo API, retrying transient failures.
+
+        Timeouts, connection failures, and HTTP 429/5xx are retried up to
+        request_retry_attempts extra times with a short exponential backoff,
+        honouring a numeric Retry-After header when the server sent one
+        (capped at request_retry_max_delay -- searches are interactive, so
+        a long server-advised wait is truncated rather than obeyed).
+        """
+        cfg = self._config
+        retries = max(0, cfg.request_retry_attempts)
+        for attempt in range(retries + 1):
+            try:
+                return await self._request_json(path, params)
+            except PrimoAPIError as e:
+                if attempt >= retries or not e.transient:
+                    raise
+                delay = (
+                    e.retry_after
+                    if e.retry_after is not None
+                    else 0.5 * (2 ** attempt)
+                )
+                await asyncio.sleep(min(delay, cfg.request_retry_max_delay))
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    @staticmethod
+    def _retry_after_seconds(response: httpx.Response) -> float | None:
+        """Parse a numeric Retry-After header; ignore HTTP-date forms."""
+        header = (response.headers.get("Retry-After") or "").strip()
+        if header.isdigit():
+            return float(header)
+        return None
+
+    async def _request_json(self, path: str, params: dict[str, Any]) -> dict:
+        """Make a single GET request to the Primo API."""
         try:
             response = await self._http.get(path, params=params)
             response.raise_for_status()
@@ -490,24 +558,35 @@ class PrimoClient:
             raise PrimoAPIError(
                 f"Request timed out after {self._config.request_timeout}s. "
                 "The Primo API may be slow or unavailable. Try again shortly.",
+                transient=True,
             ) from e
         except httpx.ConnectError as e:
             raise PrimoAPIError(
                 f"Could not connect to {self._config.base_url}. "
                 "Check your network connection and that the Primo API is available.",
+                transient=True,
             ) from e
         except httpx.HTTPStatusError as e:
             status = e.response.status_code
             if status == 400:
                 raise PrimoAPIError(
-                    f"Bad request (HTTP 400). Check your search query and parameters.",
+                    "Bad request (HTTP 400). Check your search query and parameters.",
                     status_code=400,
+                ) from e
+            elif status == 429:
+                raise PrimoAPIError(
+                    "Primo API rate limit hit (HTTP 429). Try again shortly.",
+                    status_code=429,
+                    transient=True,
+                    retry_after=self._retry_after_seconds(e.response),
                 ) from e
             elif status >= 500:
                 raise PrimoAPIError(
                     f"Primo API server error (HTTP {status}). "
                     "The service may be experiencing issues. Try again later.",
                     status_code=status,
+                    transient=True,
+                    retry_after=self._retry_after_seconds(e.response),
                 ) from e
             else:
                 raise PrimoAPIError(

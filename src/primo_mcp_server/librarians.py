@@ -938,6 +938,19 @@ def is_semantic_match(match: LibrarianMatch) -> bool:
     return match.evidence_fields == ["semantic"]
 
 
+def _semantic_topic_clause(match: LibrarianMatch) -> str:
+    """Name the profile topic behind a semantic match, when known.
+
+    The best-matching term is the actual evidence -- "cosine 0.78" alone
+    tells a caller how strong the match was but not what it was to.
+    Older callers (and near-misses built before the term was tracked) may
+    carry no term; the clause is simply omitted then.
+    """
+    if not match.matched_terms:
+        return ""
+    return f' to profile topic "{match.matched_terms[0]}"'
+
+
 def format_librarian_recommendations(
     matches: list[LibrarianMatch],
     query: str,
@@ -1010,7 +1023,8 @@ def format_librarian_recommendations(
                 librarian = match.librarian
                 if is_semantic_match(match):
                     evidence = (
-                        "closest by semantic similarity "
+                        "closest by semantic similarity"
+                        f"{_semantic_topic_clause(match)} "
                         f"(cosine {match.score:.2f}); no keyword match"
                     )
                 else:
@@ -1048,7 +1062,9 @@ def format_librarian_recommendations(
         semantic = is_semantic_match(match)
         if semantic:
             evidence = (
-                f"Matched by semantic similarity (cosine {match.score:.2f}). "
+                "Matched by semantic similarity"
+                f"{_semantic_topic_clause(match)} "
+                f"(cosine {match.score:.2f}). "
                 "No exact keyword match was found"
             )
         else:

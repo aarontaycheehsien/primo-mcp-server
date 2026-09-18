@@ -858,3 +858,194 @@ class TestSearchClauses:
         with pytest.raises(PrimoAPIError, match="empty value"):
             await self._search(handler, clauses=[{"value": " ,; "}])
         assert requests == []
+
+
+class TestFacetFilters:
+    async def _search_params(self, **kwargs) -> httpx.QueryParams:
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return _empty_response()
+
+        async with httpx.AsyncClient(
+            base_url="https://example.test/primaws/rest/pub",
+            transport=httpx.MockTransport(handler),
+        ) as http_client:
+            client = PrimoClient(http_client, _config())
+            await client.search("Singapore", **kwargs)
+
+        return requests[0].url.params
+
+    async def test_facet_filters_compile_into_qinclude(self):
+        params = await self._search_params(
+            facet_filters={"topic": "Economics", "language": "eng"}
+        )
+        assert params["qInclude"] == (
+            "facet_topic,exact,Economics|,|facet_lang,exact,eng"
+        )
+
+    async def test_facet_name_aliases_and_prefix_are_normalised(self):
+        params = await self._search_params(
+            facet_filters={"subject": "Economics", "facet_jtitle": "Nature"}
+        )
+        assert params["qInclude"] == (
+            "facet_topic,exact,Economics|,|facet_jtitle,exact,Nature"
+        )
+
+    async def test_facet_filters_append_after_dedicated_filters(self):
+        params = await self._search_params(
+            resource_type="articles",
+            peer_reviewed=True,
+            facet_filters={"topic": "Corporate governance"},
+        )
+        assert params["qInclude"] == (
+            "facet_rtype,exact,articles|,|"
+            "facet_tlevel,exact,peer_reviewed|,|"
+            "facet_topic,exact,Corporate governance"
+        )
+
+    async def test_facet_exclusions_compile_into_qexclude(self):
+        params = await self._search_params(
+            facet_exclusions={"rtype": "reviews"}
+        )
+        assert params["qExclude"] == "facet_rtype,exact,reviews"
+        assert "qInclude" not in params
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"facet_filters": {"bad name!": "x"}},
+            {"facet_filters": {"topic": "   "}},
+            {"facet_exclusions": {"": "x"}},
+        ],
+    )
+    async def test_invalid_facet_filters_do_not_make_request(self, kwargs):
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return _empty_response()
+
+        async with httpx.AsyncClient(
+            base_url="https://example.test/primaws/rest/pub",
+            transport=httpx.MockTransport(handler),
+        ) as http_client:
+            client = PrimoClient(http_client, _config())
+            with pytest.raises(PrimoAPIError):
+                await client.search("Singapore", **kwargs)
+
+        assert requests == []
+
+
+class TestTransientRetries:
+    """Timeouts, connection failures, and HTTP 429/5xx retry once by default."""
+
+    def _sleep_recorder(self, monkeypatch) -> list[float]:
+        import asyncio as _asyncio
+
+        delays: list[float] = []
+
+        async def fake_sleep(delay: float) -> None:
+            delays.append(delay)
+
+        monkeypatch.setattr(_asyncio, "sleep", fake_sleep)
+        return delays
+
+    async def _run_search(self, handler, config: PrimoConfig | None = None):
+        async with httpx.AsyncClient(
+            base_url="https://example.test/primaws/rest/pub",
+            transport=httpx.MockTransport(handler),
+        ) as http_client:
+            client = PrimoClient(http_client, config or _config())
+            return await client.search("Singapore")
+
+    async def test_429_is_retried_honouring_retry_after(self, monkeypatch):
+        delays = self._sleep_recorder(monkeypatch)
+        calls: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            if len(calls) == 1:
+                return httpx.Response(429, headers={"Retry-After": "2"})
+            return _empty_response()
+
+        response = await self._run_search(handler)
+
+        assert len(calls) == 2
+        assert delays == [2.0]
+        assert response.total_results == 0
+
+    async def test_retry_after_is_capped_at_configured_max(self, monkeypatch):
+        delays = self._sleep_recorder(monkeypatch)
+        calls: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            if len(calls) == 1:
+                return httpx.Response(503, headers={"Retry-After": "300"})
+            return _empty_response()
+
+        await self._run_search(handler)
+
+        assert delays == [_config().request_retry_max_delay]
+
+    async def test_timeout_is_retried(self, monkeypatch):
+        delays = self._sleep_recorder(monkeypatch)
+        calls: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            if len(calls) == 1:
+                raise httpx.ReadTimeout("slow", request=request)
+            return _empty_response()
+
+        response = await self._run_search(handler)
+
+        assert len(calls) == 2
+        assert delays == [0.5]
+        assert response.total_results == 0
+
+    async def test_400_is_not_retried(self, monkeypatch):
+        delays = self._sleep_recorder(monkeypatch)
+        calls: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            return httpx.Response(400)
+
+        with pytest.raises(PrimoAPIError) as exc_info:
+            await self._run_search(handler)
+
+        assert exc_info.value.status_code == 400
+        assert len(calls) == 1
+        assert delays == []
+
+    async def test_exhausted_retries_raise_the_transient_error(self, monkeypatch):
+        self._sleep_recorder(monkeypatch)
+        calls: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            return httpx.Response(503)
+
+        with pytest.raises(PrimoAPIError) as exc_info:
+            await self._run_search(handler)
+
+        assert exc_info.value.status_code == 503
+        assert len(calls) == 2  # initial attempt + default single retry
+
+    async def test_zero_attempts_disables_retries(self, monkeypatch):
+        delays = self._sleep_recorder(monkeypatch)
+        calls: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            return httpx.Response(503)
+
+        config = _config().model_copy(update={"request_retry_attempts": 0})
+        with pytest.raises(PrimoAPIError):
+            await self._run_search(handler, config=config)
+
+        assert len(calls) == 1
+        assert delays == []
