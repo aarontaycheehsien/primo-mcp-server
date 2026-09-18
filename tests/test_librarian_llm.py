@@ -439,3 +439,50 @@ async def test_sampling_provider_without_a_session_is_skipped_not_guessed():
     assert result.matches == []
     assert result.skipped is not None
     assert "sampling" in result.skipped
+
+
+async def test_unsupported_sampling_names_the_fix_not_just_the_exception():
+    """A client without sampling is a config answer, not a transient fault."""
+    from mcp.shared.exceptions import McpError
+    from mcp.types import METHOD_NOT_FOUND, ErrorData
+
+    from primo_mcp_server.librarian_llm import sampling_reasoner
+
+    session = _FakeSession(
+        error=McpError(ErrorData(code=METHOD_NOT_FOUND, message="Method not found"))
+    )
+    config = _config()
+
+    result = await llm_fallback(
+        _directory(),
+        "autism",
+        None,
+        config,
+        reasoner=sampling_reasoner(session, config=config),
+    )
+
+    assert result.matches == []
+    assert "does not support sampling" in result.error
+    assert "PRIMO_LLM_PROVIDER=openai" in result.error
+
+
+async def test_other_protocol_errors_keep_their_code_and_message():
+    from mcp.shared.exceptions import McpError
+    from mcp.types import ErrorData
+
+    from primo_mcp_server.librarian_llm import sampling_reasoner
+
+    session = _FakeSession(
+        error=McpError(ErrorData(code=-32603, message="Internal error"))
+    )
+    config = _config()
+
+    result = await llm_fallback(
+        _directory(),
+        "autism",
+        None,
+        config,
+        reasoner=sampling_reasoner(session, config=config),
+    )
+
+    assert result.error == "McpError -32603: Internal error"

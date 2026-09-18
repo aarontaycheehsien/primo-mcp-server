@@ -36,6 +36,8 @@ import re
 from typing import Awaitable, Callable, NamedTuple, Sequence
 
 import httpx
+from mcp.shared.exceptions import McpError
+from mcp.types import METHOD_NOT_FOUND
 
 from primo_mcp_server.config import PrimoConfig
 from primo_mcp_server.librarians import (
@@ -78,6 +80,30 @@ class LlmFallbackResult(NamedTuple):
     matches: list[LibrarianMatch]
     error: str | None = None
     skipped: str | None = None
+
+
+def _error_label(e: Exception) -> str:
+    """Describe a tier failure in a short, key-free string.
+
+    The exception class name alone is safe but often useless: a client that
+    does not implement sampling and one that is merely having a bad day both
+    surface as "McpError". Protocol errors carry a code and a message that
+    originate from the client (never from our configuration), so they can be
+    included, and the one code worth naming outright is METHOD_NOT_FOUND --
+    it means the tier can never work against this client, which is a
+    configuration answer rather than a transient fault.
+    """
+    if isinstance(e, McpError):
+        error = getattr(e, "error", None)
+        code = getattr(error, "code", None)
+        message = str(getattr(error, "message", "") or "")[:200]
+        if code == METHOD_NOT_FOUND:
+            return (
+                "the connected MCP client does not support sampling; set "
+                "PRIMO_LLM_PROVIDER=openai to use an HTTP endpoint instead"
+            )
+        return f"McpError {code}: {message}" if message else f"McpError {code}"
+    return type(e).__name__
 
 
 def _terms(values: Sequence[str]) -> str:
@@ -354,7 +380,7 @@ async def llm_fallback(
         logger.warning(
             "LLM librarian fallback failed (%s): %s", type(e).__name__, e
         )
-        return LlmFallbackResult([], error=type(e).__name__)
+        return LlmFallbackResult([], error=_error_label(e))
 
     try:
         matches = parse_choices(raw, directory, query, config, limit=limit)
@@ -364,6 +390,6 @@ async def llm_fallback(
             type(e).__name__,
             e,
         )
-        return LlmFallbackResult([], error=type(e).__name__)
+        return LlmFallbackResult([], error=_error_label(e))
 
     return LlmFallbackResult(matches)
