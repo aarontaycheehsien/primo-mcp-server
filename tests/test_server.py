@@ -120,6 +120,12 @@ def _fake_context(
     )
 
 
+def _search_text(output) -> str:
+    """Extract the backwards-compatible readable text from an MCP result."""
+    assert len(output.content) == 1
+    return output.content[0].text
+
+
 async def test_primo_search_smoke_does_not_return_unexpected_error():
     output = await primo_search(
         _fake_context(),
@@ -127,6 +133,7 @@ async def test_primo_search_smoke_does_not_return_unexpected_error():
         scope="catalogue",
         include_unavailable=True,
     )
+    output = _search_text(output)
 
     assert "Unexpected error" not in output
     assert "Queries run:" in output
@@ -136,14 +143,23 @@ async def test_primo_search_smoke_does_not_return_unexpected_error():
 
 
 async def test_primo_search_appends_inline_librarian_recommendation(tmp_path):
-    output = await primo_search(
+    result = await primo_search(
         _fake_context(
             config_overrides={"librarians_file": _write_librarians_file(tmp_path)}
         ),
         "executive compensation",
         scope="catalogue",
     )
+    output = _search_text(result)
 
+    assert output.startswith("## Required librarian referral")
+    assert (
+        "Caller action: You MUST include every recommended librarian's name, "
+        "title, contact, and evidence" in output
+    )
+    assert output.index("## Recommended librarian help:") < output.index(
+        "## Primo search results"
+    )
     assert "## Recommended librarian help:" in output
     assert "[Accounting Librarian](https://library.example.edu/accounting)" in output
     assert "[Data Librarian](https://library.example.edu/data)" in output
@@ -153,6 +169,14 @@ async def test_primo_search_appends_inline_librarian_recommendation(tmp_path):
     assert "Why:" not in output
     assert "Match score:" not in output
     assert "Notes:" not in output
+    assert result.structuredContent["librarian_status"] == "matched"
+    assert result.structuredContent["caller_action"] == (
+        "include_in_user_response_with_evidence"
+    )
+    recommended = result.structuredContent["librarian_recommendations"]
+    assert recommended[0]["name"] == "Accounting Librarian"
+    assert "executive compensation" in recommended[0]["evidence"]["matched_terms"]
+    assert "subjects" in recommended[0]["evidence"]["evidence_fields"]
 
 
 async def test_primo_search_can_disable_inline_librarian_recommendation(tmp_path):
@@ -164,6 +188,7 @@ async def test_primo_search_can_disable_inline_librarian_recommendation(tmp_path
         scope="catalogue",
         recommend_librarians=False,
     )
+    output = _search_text(output)
 
     assert "Executive Compensation Data" in output
     assert "## Recommended librarian help:" not in output
@@ -180,6 +205,7 @@ async def test_primo_search_respects_inline_recommendation_config(tmp_path):
         "executive compensation",
         scope="catalogue",
     )
+    output = _search_text(output)
 
     assert "Executive Compensation Data" in output
     assert "## Recommended librarian help:" not in output
@@ -194,6 +220,7 @@ async def test_primo_search_zero_results_guides_llm_iteration():
         resource_type="databases",
         recommend_librarians=False,
     )
+    output = _search_text(output)
 
     assert [call["query"] for call in client.search_calls] == ["autism"]
     assert 'No results found for "autism".' in output
@@ -213,6 +240,9 @@ def test_primo_search_description_documents_dataset_database_first_policy():
     assert 'scope="catalogue"' in PRIMO_SEARCH_DESCRIPTION
     assert 'resource_type="databases"' in PRIMO_SEARCH_DESCRIPTION
     assert "to articles or books" in PRIMO_SEARCH_DESCRIPTION
+    assert "callers MUST include every recommended librarian's name" in (
+        PRIMO_SEARCH_DESCRIPTION
+    )
 
 
 async def test_primo_search_tool_serves_the_policy_description():
@@ -347,6 +377,7 @@ async def test_primo_search_skips_recommendations_for_identifier_query(tmp_path)
         "10.1145/1571941.1572114",
         scope="everything",
     )
+    output = _search_text(output)
 
     assert "Unexpected error" not in output
     assert "## Recommended librarian help:" not in output
@@ -436,6 +467,7 @@ async def test_inline_search_uses_tighter_embedding_timeout(
         "bibliometrics",
         scope="everything",
     )
+    output = _search_text(output)
 
     assert "Unexpected error" not in output
     assert len(calls) == 1
@@ -481,13 +513,14 @@ async def test_primo_search_forwards_compound_clauses_to_client():
         clauses=clauses,
         recommend_librarians=False,
     )
+    output = _search_text(output)
 
     assert client.search_calls[0]["clauses"] == clauses
     assert "Unexpected error" not in output
 
 
 async def test_primo_search_no_match_shows_closest_profiles_with_evidence(tmp_path):
-    output = await primo_search(
+    result = await primo_search(
         _fake_context(
             config_overrides={
                 "librarians_file": _write_librarians_file(tmp_path),
@@ -499,12 +532,19 @@ async def test_primo_search_no_match_shows_closest_profiles_with_evidence(tmp_pa
         "executive compensation",
         scope="catalogue",
     )
+    output = _search_text(result)
 
     assert "Status: no_match" in output
     assert "Closest configured profiles" in output
     assert "Evidence: matched terms:" in output
     assert "(below the confidence threshold)" in output
     assert "closest configured contact" in output
+    assert result.structuredContent["librarian_status"] == "no_match"
+    assert result.structuredContent["caller_action"] is None
+    assert result.structuredContent["librarian_recommendations"] == []
+    near_miss = result.structuredContent["closest_configured_contacts"][0]
+    assert near_miss["name"] == "Accounting Librarian"
+    assert near_miss["evidence"]["matched_terms"]
 
 
 async def test_recommendation_outcomes_are_logged_when_opted_in(tmp_path):
@@ -587,13 +627,14 @@ async def test_lifespan_fires_local_embedding_warmup(monkeypatch):
 async def test_primo_search_forwards_facet_filters_to_client():
     client = _FakeClient()
 
-    output = await primo_search(
+    result = await primo_search(
         _fake_context(client=client),
         "economics",
         facet_filters={"topic": "Economics"},
         facet_exclusions={"rtype": "reviews"},
         recommend_librarians=False,
     )
+    output = _search_text(result)
 
     assert client.search_calls[0]["facet_filters"] == {"topic": "Economics"}
     assert client.search_calls[0]["facet_exclusions"] == {"rtype": "reviews"}
@@ -608,13 +649,13 @@ async def test_unexpected_tool_error_is_logged_with_traceback(caplog):
             raise RuntimeError("boom")
 
     with caplog.at_level(logging.ERROR, logger="primo_mcp_server.server"):
-        output = await primo_search(
+        result = await primo_search(
             _fake_context(client=_ExplodingClient()),
             "economics",
             recommend_librarians=False,
         )
 
-    assert output == "Unexpected error: boom"
+    assert _search_text(result) == "Unexpected error: boom"
     record = next(
         r for r in caplog.records if "Unexpected error in primo_search" in r.message
     )

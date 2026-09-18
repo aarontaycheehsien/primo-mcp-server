@@ -7,12 +7,14 @@ import functools
 import json
 import logging
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Literal
 
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.types import CallToolResult, TextContent
 
 from primo_mcp_server.citations import format_citation
 from primo_mcp_server.client import PrimoAPIError, PrimoClient
@@ -25,19 +27,94 @@ from primo_mcp_server.formatter import (
 )
 from primo_mcp_server.librarian_embeddings import warm_up_local_embedder
 from primo_mcp_server.librarians import (
+    LibrarianMatch,
     format_librarian_directory,
     format_librarian_recommendations,
+    is_semantic_match,
     load_librarian_directory_cached,
     looks_like_identifier,
 )
 from primo_mcp_server.policy import PRIMO_SEARCH_DESCRIPTION, SERVER_INSTRUCTIONS
 from primo_mcp_server.query import QueryClause
+from primo_mcp_server.rag_guard import (
+    RagSessionStore,
+    extract_citation_ids,
+    format_no_citations_failure,
+    format_retrieve_response,
+    format_validation_failure,
+    format_validation_success,
+    validate_ids,
+)
 from primo_mcp_server.recommendation import (
     RecommendationOutcome,
     recommend_with_fallback,
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class FormattedRecommendation:
+    """A librarian outcome suitable for both text and structured MCP output."""
+
+    status: Literal["matched", "no_match", "unavailable", "skipped"]
+    text: str
+    matches: list[LibrarianMatch]
+    near_misses: tuple[LibrarianMatch, ...] = ()
+
+    @property
+    def caller_action(self) -> str | None:
+        """Action a caller must take for a validated recommendation."""
+        if self.status == "matched":
+            return "include_in_user_response_with_evidence"
+        return None
+
+
+def _match_payload(match: LibrarianMatch) -> dict:
+    """Serialise a configured librarian and the evidence supporting the match."""
+    librarian = match.librarian
+    semantic = is_semantic_match(match)
+    evidence: dict[str, object] = {
+        "match_type": "semantic" if semantic else "keyword",
+        "score": match.score,
+        "matched_terms": match.matched_terms,
+        "evidence_fields": match.evidence_fields,
+    }
+    if semantic:
+        evidence["cosine_similarity"] = match.score
+
+    return {
+        "id": librarian.id,
+        "name": librarian.name,
+        "title": librarian.title,
+        "email": librarian.email,
+        "url": librarian.url,
+        "evidence": evidence,
+    }
+
+
+def _search_tool_result(
+    text: str, recommendation: FormattedRecommendation | None = None
+) -> CallToolResult:
+    """Return readable text plus explicit, evidence-bearing MCP metadata."""
+    structured: dict[str, object] = {"result": text}
+    if recommendation is not None:
+        structured.update(
+            {
+                "librarian_status": recommendation.status,
+                "caller_action": recommendation.caller_action,
+                "librarian_recommendations": [
+                    _match_payload(match) for match in recommendation.matches
+                ],
+                "closest_configured_contacts": [
+                    _match_payload(match) for match in recommendation.near_misses
+                ],
+            }
+        )
+    return CallToolResult(
+        content=[TextContent(type="text", text=text)],
+        structuredContent=structured,
+    )
 
 
 @asynccontextmanager
@@ -68,6 +145,11 @@ mcp = FastMCP(
     instructions=SERVER_INSTRUCTIONS,
     lifespan=app_lifespan,
 )
+
+# Pinned retrievals for the RAG citation guardrail. Module-level so the
+# retrieve and validate tool calls of one conversation share state for the
+# lifetime of this stdio process.
+RAG_SESSIONS = RagSessionStore()
 
 
 def _tool_error_boundary(action: str):
@@ -112,7 +194,7 @@ async def _format_recommendations_for_records(
     *,
     limit: int = 2,
     embedding_timeout: float | None = None,
-) -> str:
+) -> FormattedRecommendation:
     """Load configured profiles and format validated recommendations.
 
     The ranking itself lives in ``recommendation.recommend_with_fallback``
@@ -123,23 +205,31 @@ async def _format_recommendations_for_records(
     embedding a DOI produces noise and keyword-matching one is meaningless.
     """
     if looks_like_identifier(query):
-        return format_librarian_recommendations(
-            [],
-            query,
-            skip_reason=(
-                "The query looks like a record identifier (DOI, ISBN, ISSN, "
-                "or record ID), so librarian recommendations were skipped."
+        return FormattedRecommendation(
+            status="skipped",
+            text=format_librarian_recommendations(
+                [],
+                query,
+                skip_reason=(
+                    "The query looks like a record identifier (DOI, ISBN, ISSN, "
+                    "or record ID), so librarian recommendations were skipped."
+                ),
             ),
+            matches=[],
         )
 
     directory, message, specificity = load_librarian_directory_cached(
         config.librarians_file
     )
     if message or directory is None:
-        return format_librarian_recommendations(
-            [],
-            query,
-            configuration_message=message,
+        return FormattedRecommendation(
+            status="unavailable",
+            text=format_librarian_recommendations(
+                [],
+                query,
+                configuration_message=message,
+            ),
+            matches=[],
         )
 
     outcome = await recommend_with_fallback(
@@ -152,11 +242,16 @@ async def _format_recommendations_for_records(
         embedding_timeout=embedding_timeout,
     )
     _log_recommendation_outcome(config, query, outcome)
-    return format_librarian_recommendations(
-        outcome.matches,
-        query,
-        semantic_error=outcome.semantic_error,
-        semantic_skipped=outcome.semantic_skipped,
+    return FormattedRecommendation(
+        status="matched" if outcome.matches else "no_match",
+        text=format_librarian_recommendations(
+            outcome.matches,
+            query,
+            semantic_error=outcome.semantic_error,
+            semantic_skipped=outcome.semantic_skipped,
+            near_misses=outcome.near_misses,
+        ),
+        matches=outcome.matches,
         near_misses=outcome.near_misses,
     )
 
@@ -206,8 +301,7 @@ def _log_recommendation_outcome(
 # Tool 1: primo_search
 # ---------------------------------------------------------------------------
 
-@mcp.tool(description=PRIMO_SEARCH_DESCRIPTION)
-@_tool_error_boundary("searching Primo")
+@mcp.tool(description=PRIMO_SEARCH_DESCRIPTION, structured_output=False)
 async def primo_search(
     ctx: Context,
     query: str,
@@ -226,64 +320,83 @@ async def primo_search(
     clauses: list[QueryClause] | None = None,
     facet_filters: dict[str, str] | None = None,
     facet_exclusions: dict[str, str] | None = None,
-) -> str:
+) -> CallToolResult:
     """Search Singapore Management University Library via Primo.
 
     The caller-facing scope and zero-result retry policy plus the full
     argument reference live in policy.PRIMO_SEARCH_DESCRIPTION, which is
     served as this tool's description.
     """
-    client = _get_client(ctx)
-    config = _get_config(ctx)
-    response = await client.search(
-        query=query,
-        field=field,
-        scope=scope,
-        sort_by=sort_by,
-        limit=limit,
-        offset=offset,
-        resource_type=resource_type,
-        date_from=date_from,
-        date_to=date_to,
-        peer_reviewed=peer_reviewed,
-        include_unavailable=include_unavailable,
-        clauses=clauses,
-        facet_filters=facet_filters,
-        facet_exclusions=facet_exclusions,
-    )
-    result = format_search_results(
-        response,
-        query,
-        offset,
-        config=config,
-        field=field,
-        scope=scope,
-        sort_by=sort_by,
-        resource_type=resource_type,
-        date_from=date_from,
-        date_to=date_to,
-        peer_reviewed=peer_reviewed,
-        include_unavailable=include_unavailable,
-        clauses=clauses,
-    )
-    if (
-        recommend_librarians
-        and config.inline_librarian_recommendations
-        # Identifier lookups (DOI, ISBN, record ids) get no inline
-        # recommendation section at all rather than a "skipped" notice.
-        and not looks_like_identifier(query)
-    ):
-        result += "\n\n" + await _format_recommendations_for_records(
-            config,
-            query,
-            response.records,
-            limit=librarian_limit,
-            # Inline recommendations ride on every ordinary search, so a
-            # slow embedding call gets a tighter budget than the explicit
-            # primo_recommend_librarians tool.
-            embedding_timeout=config.embedding_inline_timeout,
+    try:
+        client = _get_client(ctx)
+        config = _get_config(ctx)
+        response = await client.search(
+            query=query,
+            field=field,
+            scope=scope,
+            sort_by=sort_by,
+            limit=limit,
+            offset=offset,
+            resource_type=resource_type,
+            date_from=date_from,
+            date_to=date_to,
+            peer_reviewed=peer_reviewed,
+            include_unavailable=include_unavailable,
+            clauses=clauses,
+            facet_filters=facet_filters,
+            facet_exclusions=facet_exclusions,
         )
-    return result
+        result = format_search_results(
+            response,
+            query,
+            offset,
+            config=config,
+            field=field,
+            scope=scope,
+            sort_by=sort_by,
+            resource_type=resource_type,
+            date_from=date_from,
+            date_to=date_to,
+            peer_reviewed=peer_reviewed,
+            include_unavailable=include_unavailable,
+            clauses=clauses,
+        )
+        recommendation: FormattedRecommendation | None = None
+        if (
+            recommend_librarians
+            and config.inline_librarian_recommendations
+            # Identifier lookups (DOI, ISBN, record ids) get no inline
+            # recommendation section at all rather than a "skipped" notice.
+            and not looks_like_identifier(query)
+        ):
+            recommendation = await _format_recommendations_for_records(
+                config,
+                query,
+                response.records,
+                limit=librarian_limit,
+                # Inline recommendations ride on every ordinary search, so a
+                # slow embedding call gets a tighter budget than the explicit
+                # primo_recommend_librarians tool.
+                embedding_timeout=config.embedding_inline_timeout,
+            )
+            if recommendation.status == "matched":
+                result = (
+                    "## Required librarian referral\n\n"
+                    "Caller action: You MUST include every recommended "
+                    "librarian's name, title, contact, and evidence in the "
+                    "user-facing response.\n\n"
+                    + recommendation.text
+                    + "\n\n## Primo search results\n\n"
+                    + result
+                )
+            else:
+                result += "\n\n" + recommendation.text
+        return _search_tool_result(result, recommendation)
+    except PrimoAPIError as e:
+        return _search_tool_result(f"Error searching Primo: {e}")
+    except Exception as e:
+        logger.exception("Unexpected error in primo_search")
+        return _search_tool_result(f"Unexpected error: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -365,8 +478,9 @@ async def primo_recommend_librarians(
 
     Recommendations are validated against the configured JSON profile
     directory. The server returns only configured librarian names; callers
-    must not invent or substitute librarian recommendations. Callers should
-    include the "Recommended librarian help:" section when summarising results.
+    must not invent or substitute librarian recommendations. When Status is
+    matched, callers MUST include every recommended librarian's name, title,
+    contact, and evidence in the user-facing response.
 
     Args:
         query: User research topic or Primo search query.
@@ -415,12 +529,13 @@ async def primo_recommend_librarians(
         )
         records = response.records
 
-    return await _format_recommendations_for_records(
+    recommendation = await _format_recommendations_for_records(
         config,
         query,
         records,
         limit=limit,
     )
+    return recommendation.text
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +564,128 @@ async def primo_list_librarians(ctx: Context) -> str:
     if message or directory is None:
         return f"Librarian directory unavailable: {message}"
     return format_librarian_directory(directory)
+
+
+# ---------------------------------------------------------------------------
+# Tool: primo_rag_retrieve
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def primo_rag_retrieve(
+    ctx: Context,
+    query: str,
+    limit: int = 5,
+    field: str = "any",
+    scope: str = "everything",
+    resource_type: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    peer_reviewed: bool | None = None,
+    style: str = "apa7",
+) -> str:
+    """Retrieve top Primo records and pin them for guarded RAG answering.
+
+    Step 1 of the citation-guardrail pipeline. Searches SMU Primo, pins the
+    top records (default 5) to a session labelled [1]-[n], and returns the
+    evidence pack plus drafting rules. Draft an answer citing ONLY numeric
+    [n] tags, then call primo_rag_validate with the session_id and the draft
+    -- validation and reference building are done by code, not by the model.
+
+    Args:
+        query: The user's research question or search terms.
+        limit: Number of records to pin (1-10, default 5).
+        field: Search field -- "any" (default), "title", "creator", "sub".
+        scope: "everything" (default, catalogue + subscribed databases) or "catalogue".
+        resource_type: Optional Primo resource type filter (e.g. "articles").
+        date_from: Optional start year filter in YYYY format.
+        date_to: Optional end year filter in YYYY format.
+        peer_reviewed: Set to true to retrieve only peer-reviewed items.
+        style: Citation style for the code-built reference list --
+            "apa7" (default), "harvard", "chicago", "ieee", "vancouver".
+
+    Returns:
+        Session id, R#-labelled source records, and drafting rules.
+    """
+    try:
+        client = _get_client(ctx)
+        limit = max(1, min(limit, 10))
+        response = await client.search(
+            query=query,
+            field=field,
+            scope=scope,
+            sort_by="rank",
+            limit=limit,
+            offset=0,
+            resource_type=resource_type,
+            date_from=date_from,
+            date_to=date_to,
+            peer_reviewed=peer_reviewed,
+            include_facets=False,
+        )
+        records = response.records[:limit]
+        if not records:
+            return (
+                f'No Primo results for "{query}". No RAG session was created. '
+                "Follow the zero-result policy: revise the query (broader "
+                "concepts, synonyms, relaxed filters) and call "
+                "primo_rag_retrieve again, up to five total attempts."
+            )
+        session = RAG_SESSIONS.create(query, records, style=style)
+        return format_retrieve_response(session)
+    except PrimoAPIError as e:
+        return f"Error searching Primo: {e}"
+    except Exception as e:
+        return f"Unexpected error: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Tool: primo_rag_validate
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def primo_rag_validate(
+    ctx: Context,
+    session_id: str,
+    draft_answer: str,
+) -> str:
+    """Validate a drafted RAG answer's [n] citations against retrieved records.
+
+    Steps 3-5 of the citation-guardrail pipeline, executed by deterministic
+    code: extract numeric [n] tags from the draft, check every ID against the
+    records pinned by primo_rag_retrieve, and -- only if all IDs are valid --
+    build the reference list from the pinned records' metadata.
+
+    On failure the response contains regeneration feedback: rewrite the
+    draft citing only retrieved sources and call this tool again. On success
+    it contains the final answer with a code-built reference list; present
+    that verbatim, including the guardrail note.
+
+    Args:
+        session_id: The session id returned by primo_rag_retrieve.
+        draft_answer: The full drafted answer containing inline [R#] tags.
+
+    Returns:
+        VALIDATION PASSED with the assembled final answer, or VALIDATION
+        FAILED with feedback for regeneration.
+    """
+    try:
+        session = RAG_SESSIONS.get(session_id)
+        if session is None:
+            return (
+                f'Unknown RAG session "{session_id}". Sessions live only for '
+                "this server process. Call primo_rag_retrieve first and use "
+                "the session id it returns."
+            )
+        session.attempts += 1
+        cited = extract_citation_ids(draft_answer)
+        if not cited:
+            return format_no_citations_failure(session)
+        valid, invalid = validate_ids(cited, len(session.records))
+        if invalid:
+            return format_validation_failure(session, invalid, cited)
+        return format_validation_success(session, draft_answer, valid)
+    except Exception as e:
+        return f"Unexpected error: {e}"
 
 
 # ---------------------------------------------------------------------------

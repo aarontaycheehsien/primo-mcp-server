@@ -111,8 +111,10 @@ queries.
 Recommendations are validated against the configured JSON profile
 directory. Only configured librarian names may be returned; never invent
 or substitute names. `primo_recommend_librarians` is the explicit tool;
-`primo_search` appends inline recommendations by default (suppress with
-`recommend_librarians=false`); `primo_list_librarians` returns the complete
+`primo_search` puts validated inline recommendations first by default (suppress with
+`recommend_librarians=false`); when an outcome is `matched`, callers must include
+each recommended librarian's name, title, contact, and evidence in the user-facing
+response. `primo_list_librarians` returns the complete
 configured directory when no recommendation clears the threshold or when
 the user asks who the librarians are. Deterministic keyword matching runs first,
 with an optional Gemini embedding fallback when keyword matches are weak

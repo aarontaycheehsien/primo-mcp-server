@@ -66,6 +66,34 @@ pytest tests/ -v
 | `primo_list_librarians` | List every configured librarian profile with contact and coverage |
 | `primo_cite` | Generate formatted citations |
 | `primo_export` | Export records as BibTeX, RIS, or CSV |
+| `primo_rag_retrieve` | Retrieve top records (default 5) and pin them to a session for guarded RAG answering |
+| `primo_rag_validate` | Validate a draft's [R#] citations against the pinned session and build the reference list |
+
+## RAG Citation Guardrails
+
+`primo_rag_retrieve` and `primo_rag_validate` implement a guarded RAG loop
+where deterministic code — not the model — enforces that citations point to
+retrieved sources:
+
+1. `primo_rag_retrieve` searches Primo, pins the top records to a session
+   labelled `[1]`-`[n]`, and returns them with drafting rules.
+2. The calling model drafts an answer citing only structured numeric `[n]`
+   tags (e.g. `[1]` or grouped `[2, 4]`).
+3. `primo_rag_validate` extracts every `[n]` tag, checks each ID against
+   the pinned records, and on any invalid ID returns regeneration feedback
+   instead of an answer.
+4. Only when all IDs validate does it assemble the final answer, building
+   the reference list from the pinned records' metadata (never from model
+   text) in the session's citation style.
+
+Honest limits, stated in every success response: the check proves a cited
+ID *was retrieved*, not that the source supports the claim; prose citations
+and uncited claims bypass it (a warn-only heuristic flags author-year
+patterns); and errors in Primo metadata are reproduced as-is. Sessions are
+in-memory and last only for the server process lifetime.
+
+`demo_rag_citation_guard.py` is a dependency-free sketch of the same
+pipeline with a stubbed LLM and toy corpus.
 
 ## Scope Behaviour
 
@@ -166,7 +194,7 @@ environment variables:
 | `PRIMO_INCLUDE_UNAVAILABLE` | `false` | Include CDI records without full text access in search results |
 | `PRIMO_SEARCH_FACETS` | `true` | Fetch the facet summary after each search and append a "Result landscape" section (facets are only served for the Everything scope; other scopes omit the section) |
 | `PRIMO_LIBRARIANS_FILE` | unset | External JSON librarian directory used for recommendations |
-| `PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS` | `true` | Append a bottom `Recommended librarian help:` section to `primo_search` output |
+| `PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS` | `true` | Put matched, evidence-bearing librarian referrals before `primo_search` results |
 | `PRIMO_LIBRARIAN_MIN_SCORE` | `5.0` | Minimum deterministic match score required before showing a recommendation |
 | `PRIMO_RECOMMEND_LOG_FILE` | unset | Opt-in JSONL log of recommendation outcomes (query, status, match/near-miss ids and scores) for triaging real queries into the golden eval set. Privacy note: this log captures raw user query text on local disk; enable it only with a retention policy in mind |
 | `PRIMO_LIBRARIAN_SEMANTIC_FALLBACK` | `false` | Enable the embedding path used when keyword matching finds nothing or matches weakly |
@@ -281,9 +309,11 @@ ISSNs, Alma/CDI record ids) skip librarian recommendations entirely on both
 paths.
 
 When `PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS=true` and a configured profile
-meets the score threshold, `primo_search` appends a bottom Markdown section
-headed `## Recommended librarian help:`. Callers should preserve this section when
-summarising Primo results.
+meets the score threshold, `primo_search` puts a Markdown section headed
+`## Required librarian referral` before the results. Callers MUST include every
+recommended librarian's name, title, contact, and evidence in the user-facing
+response. The same evidence-bearing recommendation is also exposed in the MCP
+structured response with `caller_action: "include_in_user_response_with_evidence"`.
 
 The recommendation display uses a fixed labelled format for each matched
 profile:

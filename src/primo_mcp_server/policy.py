@@ -58,7 +58,9 @@ ZERO_RESULT_GUIDANCE_LINES = [
 
 LIBRARIAN_POLICY_TEXT = (
     "Librarian recommendations are limited to configured profile IDs; do "
-    "not invent or substitute names."
+    "not invent or substitute names. When a search returns Status: matched, "
+    "callers MUST include every recommended librarian's name, title, contact, "
+    "and evidence in the user-facing response."
 )
 
 
@@ -112,9 +114,10 @@ Args:
         literature mapping.
     recommend_librarians: Set to false to suppress inline librarian
         recommendations for this search. Inline recommendations also
-        require PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS=true. When shown,
-        callers should include the bottom "Recommended librarian help:"
-        section when summarising Primo results.
+        require PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS=true. When Status is
+        matched, callers MUST include every recommended librarian's name,
+        title, contact, and evidence in the user-facing response. The
+        structured response also exposes this as caller_action.
     librarian_limit: Number of librarian recommendations to include
         inline. Defaults to 2 and is capped at 3.
     facet_filters: Optional facet refinements as a {facet: value} object,
