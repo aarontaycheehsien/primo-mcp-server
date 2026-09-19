@@ -181,6 +181,38 @@ def test_load_librarian_directory_cached_reloads_after_file_change(tmp_path):
     assert directory2.librarians[0].name == "Renamed Librarian"
 
 
+def test_load_librarian_directory_cached_reloads_when_only_size_changed(tmp_path):
+    """An edit inside one filesystem timer tick must still invalidate.
+
+    NTFS advances last-write-time only on the ~15.6ms tick, so a hand edit
+    landing in the same tick as the previous write shares its mtime. Pinning
+    the mtime back reproduces that exactly: size is the half of the key that
+    has to catch it, or the stale directory is served until restart.
+    """
+    path = _write_directory(
+        tmp_path,
+        {"librarians": [{"id": "biz", "name": "Business Librarian"}]},
+    )
+    before = Path(path).stat()
+    directory1, _, _ = load_librarian_directory_cached(path)
+
+    Path(path).write_text(
+        json.dumps(
+            {"librarians": [{"id": "biz", "name": "Renamed Much Longer Librarian"}]}
+        ),
+        encoding="utf-8",
+    )
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert Path(path).stat().st_mtime_ns == before.st_mtime_ns
+    assert Path(path).stat().st_size != before.st_size
+
+    directory2, message2, _ = load_librarian_directory_cached(path)
+
+    assert message2 is None
+    assert directory1.librarians[0].name == "Business Librarian"
+    assert directory2.librarians[0].name == "Renamed Much Longer Librarian"
+
+
 def test_load_librarian_directory_cached_missing_file_returns_guidance(tmp_path):
     directory, message, specificity = load_librarian_directory_cached(
         tmp_path / "missing.json"

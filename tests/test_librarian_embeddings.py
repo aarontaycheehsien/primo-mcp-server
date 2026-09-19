@@ -1135,12 +1135,17 @@ async def test_sidecar_cache_is_memoised_in_memory(tmp_path):
     )
     assert sum(1 for _, task in embedder.calls if task == "RETRIEVAL_DOCUMENT") == 1
 
-    # Corrupt the sidecar on disk but restore its mtime: an unchanged mtime
-    # must be served from the in-memory memo without re-reading the file, so
-    # the corruption stays invisible and nothing is re-embedded.
+    # Corrupt the sidecar on disk but leave both halves of the memo key --
+    # mtime and size -- exactly as they were. The file must then be served
+    # from the in-memory memo without being re-read, so the corruption stays
+    # invisible and nothing is re-embedded. Holding the length constant is
+    # what makes this a probe for "did it re-read?" rather than a test of
+    # size-based invalidation, which is covered by the sibling test below.
     cache_path = tmp_path / "embeddings.json"
     stat = cache_path.stat()
-    cache_path.write_text("{not json", encoding="utf-8")
+    original = cache_path.read_text(encoding="utf-8")
+    cache_path.write_text("x" * len(original), encoding="utf-8")
+    assert cache_path.stat().st_size == stat.st_size
     os.utime(cache_path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
 
     second = await score_profiles(
@@ -1160,8 +1165,10 @@ async def test_sidecar_change_on_disk_is_picked_up(tmp_path):
     )
     assert sum(1 for _, task in embedder.calls if task == "RETRIEVAL_DOCUMENT") == 1
 
-    # A real content change (new mtime) invalidates the memo: the corrupt
-    # file is re-read, yields no usable entries, and documents re-embed.
+    # A real content change invalidates the memo: the corrupt file is
+    # re-read, yields no usable entries, and documents re-embed. The new
+    # length is what guarantees this -- the rewrite lands inside the same
+    # ~15.6ms NTFS timer tick often enough that mtime alone would miss it.
     (tmp_path / "embeddings.json").write_text("{not json", encoding="utf-8")
 
     await score_profiles(

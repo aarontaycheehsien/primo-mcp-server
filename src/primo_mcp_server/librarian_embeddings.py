@@ -193,6 +193,7 @@ _CACHE_FORMAT = 2
 
 class _SidecarCacheEntry(NamedTuple):
     mtime_ns: int
+    size: int
     data: dict
 
 
@@ -200,8 +201,16 @@ class _SidecarCacheEntry(NamedTuple):
 # sidecar holds every profile-term vector (megabytes of JSON for a real
 # directory) and was previously re-read and re-parsed on EVERY semantic
 # call -- a fixed tax inside the inline search path's tight latency budget.
-# The mtime check (one stat syscall) keeps external edits and multi-process
-# writers visible, mirroring the directory cache in librarians.py.
+# The stat check keeps external edits and multi-process writers visible,
+# mirroring the directory cache in librarians.py.
+#
+# Size is part of the key because mtime alone misses same-tick rewrites:
+# NTFS updates last-write-time on the ~15.6ms system timer tick, so two
+# writes inside one tick share an mtime and a stale memo would be served
+# indefinitely. Both fields come from the one stat call already being made,
+# so the extra safety is free. A rewrite that is both same-tick AND exactly
+# the same length still slips through; catching that needs a content hash,
+# which would mean reading the megabytes this memo exists to avoid.
 _sidecar_cache: dict[str, _SidecarCacheEntry] = {}
 
 
@@ -209,12 +218,13 @@ def _read_cache(path: Path | None) -> dict:
     if path is None:
         return {}
     try:
-        mtime_ns = path.stat().st_mtime_ns
+        stat = path.stat()
     except OSError:
         return {}
+    mtime_ns, size = stat.st_mtime_ns, stat.st_size
     key = str(path)
     cached = _sidecar_cache.get(key)
-    if cached is not None and cached.mtime_ns == mtime_ns:
+    if cached is not None and cached.mtime_ns == mtime_ns and cached.size == size:
         return cached.data
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -222,7 +232,7 @@ def _read_cache(path: Path | None) -> dict:
         return {}
     if not isinstance(data, dict) or data.get("format") != _CACHE_FORMAT:
         data = {}
-    _sidecar_cache[key] = _SidecarCacheEntry(mtime_ns, data)
+    _sidecar_cache[key] = _SidecarCacheEntry(mtime_ns, size, data)
     return data
 
 
@@ -246,8 +256,9 @@ def _write_cache(
     # Keep the in-memory memo in step with what was just written, so the
     # next call is served from memory instead of re-parsing our own write.
     try:
+        stat = path.stat()
         _sidecar_cache[str(path)] = _SidecarCacheEntry(
-            path.stat().st_mtime_ns, data
+            stat.st_mtime_ns, stat.st_size, data
         )
     except OSError:
         _sidecar_cache.pop(str(path), None)

@@ -185,6 +185,7 @@ def _duplicate_ids(directory: LibrarianDirectory) -> list[str]:
 
 class _DirectoryCacheEntry(NamedTuple):
     mtime_ns: int
+    size: int
     directory: LibrarianDirectory
     specificity: dict[str, float]
 
@@ -192,8 +193,14 @@ class _DirectoryCacheEntry(NamedTuple):
 # Keyed by resolved absolute path. Every primo_search / primo_recommend_librarians
 # call needs the directory and its IDF specificity weights; re-reading and
 # re-parsing the JSON file and recomputing IDF on every request is wasted
-# work since the directory changes rarely. A file's mtime is cheap to check
-# (a single stat syscall) and lets repeat calls skip the reparse entirely.
+# work since the directory changes rarely. One stat syscall gives both halves
+# of the key and lets repeat calls skip the reparse entirely.
+#
+# Size rides along with mtime for the reason given on the sidecar memo in
+# librarian_embeddings.py: NTFS only advances last-write-time on the ~15.6ms
+# timer tick, so two writes in one tick share an mtime. This file is edited
+# by hand -- adding a librarian, correcting a subject list -- and a missed
+# edit would serve the old directory until the process restarts.
 _directory_cache: dict[str, _DirectoryCacheEntry] = {}
 
 
@@ -212,16 +219,17 @@ def load_librarian_directory_cached(
 
     resolved = Path(path).expanduser()
     try:
-        mtime_ns = resolved.stat().st_mtime_ns
+        stat = resolved.stat()
     except OSError:
         # Let load_librarian_directory produce the precise error message
         # (not-found vs permission vs other OS error).
         directory, message = load_librarian_directory(path)
         return directory, message, {}
 
+    mtime_ns, size = stat.st_mtime_ns, stat.st_size
     cache_key = str(resolved)
     cached = _directory_cache.get(cache_key)
-    if cached is not None and cached.mtime_ns == mtime_ns:
+    if cached is not None and cached.mtime_ns == mtime_ns and cached.size == size:
         return cached.directory, None, cached.specificity
 
     directory, message = load_librarian_directory(path)
@@ -230,7 +238,9 @@ def load_librarian_directory_cached(
         return None, message, {}
 
     specificity = _term_specificity(directory)
-    _directory_cache[cache_key] = _DirectoryCacheEntry(mtime_ns, directory, specificity)
+    _directory_cache[cache_key] = _DirectoryCacheEntry(
+        mtime_ns, size, directory, specificity
+    )
     return directory, None, specificity
 
 
