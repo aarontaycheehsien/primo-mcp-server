@@ -59,7 +59,8 @@ score thresholds, margins, timeouts, and the query token gate):
 - PRIMO_LIBRARIANS_FILE -- path to the JSON librarian profile directory.
   No real profile data is bundled; local installs opt in by setting this.
 - PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS -- append a "Recommended librarian
-  help:" section to primo_search results (default true)
+  help:" section to primo_search results (default false; every librarian
+  recommendation switch ships off, since no profile data is bundled)
 - PRIMO_LIBRARIAN_MIN_SCORE -- keyword match acceptance threshold
 - PRIMO_LIBRARIAN_SEMANTIC_FALLBACK -- enable the embedding fallback
   (default false)
@@ -77,8 +78,8 @@ score thresholds, margins, timeouts, and the query token gate):
   (default false). PRIMO_LLM_PROVIDER picks the backend: "caller" (default,
   the calling model routes and primo_submit_librarian_choice validates),
   "sampling" (MCP sampling), or "openai" (PRIMO_LLM_URL / PRIMO_LLM_MODEL /
-  PRIMO_LLM_API_KEY). PRIMO_LIBRARIAN_LLM_INLINE (default true) allows it on
-  inline searches -- free for "caller", a round trip for the others
+  PRIMO_LLM_API_KEY). PRIMO_LIBRARIAN_LLM_INLINE (default false) allows it
+  on inline searches -- free for "caller", a round trip for the others
 
 ## Search Scope Policy
 
@@ -175,7 +176,8 @@ choice to `primo_submit_librarian_choice`. That tool runs `validate_choices`
 -- the single enforcement point shared by all three backends -- so the
 closed-vocabulary, deny-list, evidence and confidence rules apply no matter
 which model reasoned. Because nothing is called out to, this backend costs
-an inline search nothing and runs inline by default.
+an inline search nothing, though like every recommendation switch it still
+ships off (PRIMO_LIBRARIAN_LLM_INLINE).
 
 `sampling` asks the
 connected MCP client to run the completion on the model already driving the

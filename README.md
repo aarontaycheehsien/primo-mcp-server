@@ -196,7 +196,7 @@ environment variables:
 | `PRIMO_INCLUDE_UNAVAILABLE` | `false` | Include CDI records without full text access in search results |
 | `PRIMO_SEARCH_FACETS` | `true` | Fetch the facet summary after each search and append a "Result landscape" section (facets are only served for the Everything scope; other scopes omit the section) |
 | `PRIMO_LIBRARIANS_FILE` | unset | External JSON librarian directory used for recommendations |
-| `PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS` | `true` | Put matched, evidence-bearing librarian referrals before `primo_search` results |
+| `PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS` | `false` | Put matched, evidence-bearing librarian referrals before `primo_search` results. Off by default — every librarian switch ships off, since no profile data is bundled |
 | `PRIMO_LIBRARIAN_MIN_SCORE` | `5.0` | Minimum deterministic match score required before showing a recommendation |
 | `PRIMO_RECOMMEND_LOG_FILE` | unset | Opt-in JSONL log of recommendation outcomes (query, status, match/near-miss ids and scores) for triaging real queries into the golden eval set. Privacy note: this log captures raw user query text on local disk; enable it only with a retention policy in mind |
 | `PRIMO_LIBRARIAN_SEMANTIC_FALLBACK` | `false` | Enable the embedding path used when keyword matching finds nothing or matches weakly |
@@ -229,7 +229,7 @@ environment variables:
 | `PRIMO_LLM_API_KEY` | unset | Bearer token for the endpoint above; kept separate from `PRIMO_EMBEDDING_API_KEY` |
 | `PRIMO_LLM_TIMEOUT` | `20.0` | HTTP timeout for the reasoning call in seconds |
 | `PRIMO_LIBRARIAN_LLM_MIN_CONFIDENCE` | `0.6` | Floor on the model's self-reported confidence; a coarse gate, not a calibrated threshold |
-| `PRIMO_LIBRARIAN_LLM_INLINE` | `true` | Allow the reasoning tier on inline `primo_search` recommendations (free for the `caller` backend; set false for backends that call out) |
+| `PRIMO_LIBRARIAN_LLM_INLINE` | `false` | Allow the reasoning tier on inline `primo_search` recommendations (free for the `caller` backend; leave off for backends that call out) |
 
 See `.env.example` for a commented template.
 
@@ -367,10 +367,11 @@ confidence** — deliberately named, since unlike a cosine it is not comparable
 across queries and is never fed into the embedding tier's self-calibrating
 threshold.
 
-With the `caller` backend the tier runs inline by default, since it makes
-no network call of its own. Set `PRIMO_LIBRARIAN_LLM_INLINE=false` when
-using `openai` or `sampling`, whose round trip would push inline
-recommendations past their ~2.5s budget.
+Like every recommendation switch, it ships off. Set
+`PRIMO_LIBRARIAN_LLM_INLINE=true` to let it run on inline searches — cheap
+with the `caller` backend, which makes no network call of its own, but with
+`openai` or `sampling` the round trip can push inline recommendations past
+their ~2.5s budget.
 
 When `PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS=true` and a configured profile
 meets the score threshold, `primo_search` puts a Markdown section headed

@@ -36,7 +36,13 @@ def test_default_config_is_smu(monkeypatch):
     assert config.scope_combined == "MyInst_and_CI"
     assert config.scope_books_videos == "BooksVideos"
     assert config.librarians_file is None
-    assert config.inline_librarian_recommendations is True
+    # Every librarian recommendation switch ships off; an institution
+    # opts in after configuring a directory.
+    assert config.inline_librarian_recommendations is False
+    assert config.librarian_semantic_fallback is False
+    assert config.librarian_llm_fallback is False
+    assert config.librarian_llm_inline is False
+    assert config.librarians_file is None
     assert config.librarian_min_score == 5.0
 
 

@@ -65,7 +65,11 @@ class PrimoConfig(BaseSettings):
     # Optional external JSON directory used for librarian recommendations.
     # No real profile data is bundled; local installs opt in by setting this.
     librarians_file: str | None = None
-    inline_librarian_recommendations: bool = True
+    # Off by default: no librarian data is bundled, and an institution
+    # should opt in to routing its users at people. Set true (with
+    # librarians_file) to append a "Recommended librarian help:" section to
+    # every primo_search result.
+    inline_librarian_recommendations: bool = False
     librarian_min_score: float = 5.0
     # Opt-in JSONL log of recommendation outcomes (query, status, match and
     # near-miss ids with scores). Exists to close the tuning loop: real
@@ -165,12 +169,12 @@ class PrimoConfig(BaseSettings):
     # across queries or models, which is why it is kept out of the
     # embedding path's self-calibrating mean+margin rule.
     librarian_llm_min_confidence: float = 0.6
-    # Whether the LLM tier may run on the inline primo_search path. On by
-    # default because the "caller" backend makes no network call of its own,
-    # so it costs the search nothing; set it false (or use a backend that
-    # does call out, such as "openai") when the round trip would push inline
+    # Whether the LLM tier may run on the inline primo_search path. Off by
+    # default, like every other recommendation switch. Turning it on is
+    # cheap with the "caller" backend, which makes no network call of its
+    # own; with "openai" or "sampling" the round trip can push inline
     # recommendations past their ~2.5s budget.
-    librarian_llm_inline: bool = True
+    librarian_llm_inline: bool = False
     # Optional Matryoshka truncation (e.g. 768) to cut cache size and latency.
     # gemini-embedding-001 degrades little when truncated; cosine scoring
     # renormalises, so no extra normalisation step is needed. Changing this

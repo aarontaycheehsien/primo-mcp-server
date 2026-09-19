@@ -108,6 +108,10 @@ def _fake_context(
 ) -> SimpleNamespace:
     config_values = {
         "base_url": "https://example.test/primaws/rest/pub",
+        # These tests exercise a configured institution. Inline
+        # recommendations ship OFF (no librarian data is bundled), so the
+        # harness opts in; tests of the off path override it explicitly.
+        "inline_librarian_recommendations": True,
     }
     if config_overrides:
         config_values.update(config_overrides)
