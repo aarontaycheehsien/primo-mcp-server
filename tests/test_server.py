@@ -250,6 +250,7 @@ async def test_primo_search_always_demands_queries_attempted_and_counts():
     assert output.startswith("## Required search transparency")
     assert '"Queries attempted:" list naming every query run' in output
     assert "number of results each returned" in output
+    assert "click it to re-run the search" in output
     assert "Queries attempted:" in output
     assert "- Results found: [any,contains,ceo compensation](" in output
     assert "-- 1 result" in output

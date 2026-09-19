@@ -60,6 +60,10 @@ SEARCH_TRANSPARENCY_POLICY_LINES = [
     "Every user-facing answer built from primo_search MUST include a "
     '"Queries attempted:" list naming each query actually run and the '
     "number of results it returned.",
+    "Carry each entry over as the markdown link the tool printed, so the "
+    "user can click through and re-run that exact search in Primo. Never "
+    "flatten it to a bare query string: the link is how a reader checks "
+    "the search rather than taking the summary on trust.",
     "List every attempt made in the turn, including attempts that returned "
     "zero results and attempts that were later widened or abandoned -- not "
     "just the attempt that worked.",
@@ -81,8 +85,10 @@ SEARCH_TRANSPARENCY_TEXT = (
     "Caller action: You MUST include, in the user-facing response, a "
     '"Queries attempted:" list naming every query run in this turn and the '
     "number of results each returned -- including attempts that returned "
-    "zero results. The list below covers this call only; combine it with "
-    "the other primo_search calls of this turn."
+    "zero results. Copy each entry's markdown link through verbatim so the "
+    "user can click it to re-run the search; do not reduce it to plain "
+    "text. The list below covers this call only; combine it with the other "
+    "primo_search calls of this turn."
 )
 
 LIBRARIAN_POLICY_TEXT = (
