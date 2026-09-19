@@ -1479,9 +1479,10 @@ def test_routing_request_keeps_near_miss_evidence_without_conflicting_permission
 
     Regression: an early return once dropped the near-miss block entirely,
     losing the matched terms the keyword tier had already found. They are
-    kept, but relabelled -- under a routing request they are input to the
-    caller's decision, not contacts it may pass on, because two conflicting
-    permissions would be worse than none.
+    kept, but reduced to id plus evidence -- under a routing request they
+    are input to the caller's decision, not contacts it may pass on, and
+    printing the name here would hand back exactly what the routing task a
+    few lines below withholds.
     """
     from primo_mcp_server.librarians import (
         LibrarianMatch,
@@ -1490,7 +1491,9 @@ def test_routing_request_keeps_near_miss_evidence_without_conflicting_permission
     )
 
     near = LibrarianMatch(
-        librarian=LibrarianProfile(id="biz", name="Business Librarian"),
+        librarian=LibrarianProfile(
+            id="biz", name="Business Librarian", email="biz@example.edu"
+        ),
         score=2.0,
         matched_terms=["market"],
         evidence_fields=["subjects"],
@@ -1502,9 +1505,11 @@ def test_routing_request_keeps_near_miss_evidence_without_conflicting_permission
         llm_routing_request="ROUTING REQUEST: call primo_submit_librarian_choice",
     )
 
-    assert "Business Librarian" in output
+    assert "Profile id: biz" in output
     assert "matched terms: market" in output
     assert "NOT people you may name" in output
+    assert "Business Librarian" not in output
+    assert "biz@example.edu" not in output
     # The permissive near-miss wording must not appear alongside a routing
     # request; the routing rule is the only rule about what may be shown.
     assert "If you still refer the user" not in output

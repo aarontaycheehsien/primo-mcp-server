@@ -311,6 +311,123 @@ async def test_transparency_survives_the_librarian_referral_prepend(tmp_path):
     assert result.structuredContent["search_transparency"]["total_results"] == 1
 
 
+async def test_routing_request_leads_the_search_result(tmp_path):
+    """Owed work must lead, not trail several screens of hits.
+
+    Appended last, the routing task was the easiest thing in the response
+    for a caller to never reach -- and a caller that never reaches it
+    silently produces no recommendation at all.
+    """
+    result = await primo_search(
+        _fake_context(
+            config_overrides={
+                "librarians_file": _write_librarians_file(tmp_path),
+                "librarian_llm_fallback": True,
+                "librarian_llm_inline": True,
+                "llm_provider": "caller",
+                # Force a keyword miss so the routing tier engages.
+                "librarian_min_score": 10_000.0,
+            }
+        ),
+        "deep sea fishing quotas",
+        scope="catalogue",
+    )
+    output = _search_text(result)
+
+    assert output.startswith("## Required librarian routing decision")
+    assert "primo_submit_librarian_choice" in output
+    # Deciding that nobody fits has to read as a real option, or the only
+    # way to satisfy the banner looks like naming someone.
+    assert "no configured librarian" in output
+    assert "## Primo search results" in output
+    assert "## Required search transparency" in output
+
+    structured = result.structuredContent
+    # Still no_match: a request for a decision is never a recommendation.
+    assert structured["librarian_status"] == "no_match"
+    assert structured["caller_action"] == "submit_librarian_choice_or_state_no_match"
+    assert structured["librarian_recommendations"] == []
+
+
+async def test_pending_routing_withholds_names_from_the_metadata_too(tmp_path):
+    """Withholding a name in the text is worth nothing if metadata carries it.
+
+    The text asks the caller to route on expertise and to obtain a name
+    only from primo_submit_librarian_choice. A caller reads
+    structuredContent just as easily, so a near-miss payload with name and
+    email in it hands back precisely what the text declined to give.
+    """
+    result = await primo_search(
+        _fake_context(
+            config_overrides={
+                "librarians_file": _write_librarians_file(tmp_path),
+                "librarian_llm_fallback": True,
+                "librarian_llm_inline": True,
+                "llm_provider": "caller",
+                "librarian_min_score": 10_000.0,
+            }
+        ),
+        "executive compensation",
+        scope="catalogue",
+    )
+
+    contacts = result.structuredContent["closest_configured_contacts"]
+    assert contacts, "near-miss evidence is the point of this payload"
+    for contact in contacts:
+        assert contact["id"]
+        # Evidence survives anonymisation: the caller still needs to know
+        # why this profile came close in order to decide.
+        assert contact["evidence"]["matched_terms"] is not None
+        assert "name" not in contact
+        assert "email" not in contact
+        assert "url" not in contact
+
+    blob = json.dumps(result.structuredContent)
+    assert "Accounting Librarian" not in blob
+    assert "accounting@example.edu" not in blob
+
+
+async def test_plain_no_match_still_names_the_closest_contacts(tmp_path):
+    """Anonymising is scoped to a pending decision, not to every no-match.
+
+    With no routing request outstanding there is no tool standing between
+    the caller and a name, so stripping the identity fields would only
+    remove the one contact a caller could offer, with its evidence.
+    """
+    result = await primo_search(
+        _fake_context(
+            config_overrides={
+                "librarians_file": _write_librarians_file(tmp_path),
+                "librarian_min_score": 10_000.0,
+            }
+        ),
+        "executive compensation",
+        scope="catalogue",
+    )
+
+    contacts = result.structuredContent["closest_configured_contacts"]
+    assert contacts
+    assert all(contact["name"] for contact in contacts)
+
+
+async def test_no_routing_request_means_no_caller_action(tmp_path):
+    """A plain no-match owes the caller nothing, and must not claim to."""
+    result = await primo_search(
+        _fake_context(
+            config_overrides={
+                "librarians_file": _write_librarians_file(tmp_path),
+                "librarian_min_score": 10_000.0,
+            }
+        ),
+        "deep sea fishing quotas",
+        scope="catalogue",
+    )
+
+    assert not _search_text(result).startswith("## Required librarian routing")
+    assert result.structuredContent["librarian_status"] == "no_match"
+    assert result.structuredContent["caller_action"] is None
+
+
 async def test_submit_librarian_choice_publishes_its_contract_in_the_schema():
     """The id/confidence/reason contract must survive in the JSON schema.
 
@@ -800,8 +917,11 @@ async def test_keyword_miss_asks_the_caller_to_route(tmp_path):
 
     assert "Status: no_match" in output
     assert "librarian routing needed" in output
-    assert "id=accounting" in output and "id=data" in output
+    assert "Profile id: accounting" in output and "Profile id: data" in output
     assert "primo_submit_librarian_choice" in output
+    # Names are withheld until a choice is validated, so the only way to
+    # name a librarian is to go through the tool that re-checks the id.
+    assert "Accounting Librarian" not in output
 
 
 async def test_submitted_choice_is_validated_and_formatted(tmp_path):

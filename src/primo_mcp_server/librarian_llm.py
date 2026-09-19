@@ -132,6 +132,31 @@ def _profile_line(index: int, profile: LibrarianProfile) -> str:
     return " | ".join(parts)
 
 
+def _routing_profile_block(index: int, profile: LibrarianProfile) -> list[str]:
+    """One directory entry for the caller-facing routing task.
+
+    Two things separate this from ``_profile_line``. It uses the field
+    layout every other librarian section renders in, rather than a second
+    pipe-delimited shape in the same response. And it carries no name,
+    email or profile link: a caller told not to name anyone it has not
+    submitted should not be holding the names while it reads the rule.
+    ``primo_submit_librarian_choice`` is what turns an id back into a
+    person, which is what makes that the only path to a nameable match.
+    """
+    lines = [f"{index}. Profile id: {profile.id}"]
+    if profile.title:
+        lines.append(f"   Title: {profile.title}")
+    if profile.subjects:
+        lines.append(f"   Subjects: {_terms(profile.subjects)}")
+    if profile.keywords:
+        lines.append(f"   Keywords: {_terms(profile.keywords)}")
+    if profile.best_for:
+        lines.append(f"   Best for: {_terms(profile.best_for)}")
+    if profile.schools:
+        lines.append(f"   Schools: {_terms(profile.schools)}")
+    return lines
+
+
 def build_prompt(
     directory: LibrarianDirectory,
     query: str,
@@ -337,23 +362,24 @@ def build_routing_request(
     model reasons in the middle, code decides what may be shown.
     """
     profiles = directory.librarians[:_MAX_PROMPT_PROFILES]
-    lines = [
-        _profile_line(i, profile) for i, profile in enumerate(profiles, start=1)
-    ]
+    lines: list[str] = []
+    for i, profile in enumerate(profiles, start=1):
+        lines.extend(_routing_profile_block(i, profile))
     return (
         "Caller action -- librarian routing needed: keyword matching found "
         f'no librarian for "{query}". Decide whether any configured profile '
         "below genuinely covers this subject, judging by expertise rather "
         "than word overlap.\n\n"
-        "Configured profiles:\n"
+        "Configured profiles (identified by id; names and contact details "
+        "are withheld until a choice is validated):\n"
         + "\n".join(lines)
         + "\n\n"
         "If one or more genuinely fit, call primo_submit_librarian_choice "
         f'with query="{query}" and up to {limit} choices, each giving the '
         "exact id, your confidence (0-1), and a one-sentence reason naming "
         "the expertise that fits. That tool re-checks every id against the "
-        "directory and is the ONLY way a librarian may be shown -- do not "
-        "name a librarian in your reply that it has not returned.\n"
+        "directory and returns the name and contact to show the user; it is "
+        "the ONLY way a librarian may be named.\n"
         "If none genuinely fit, do not call it: say no configured librarian "
         "covers this topic and offer primo_list_librarians as directory "
         "information. An empty answer is correct and expected for a subject "

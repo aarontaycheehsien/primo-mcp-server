@@ -75,17 +75,31 @@ class FormattedRecommendation:
     text: str
     matches: list[LibrarianMatch]
     near_misses: tuple[LibrarianMatch, ...] = ()
+    # True when the caller-reasoned tier asked this caller for a routing
+    # decision. Status stays no_match -- the request is a task, not a
+    # recommendation -- so this is what distinguishes "nothing to do" from
+    # "something is owed" for a caller reading metadata.
+    routing_request_pending: bool = False
 
     @property
     def caller_action(self) -> str | None:
-        """Action a caller must take for a validated recommendation."""
+        """Action a caller must take before answering the user."""
         if self.status == "matched":
             return "include_in_user_response_with_evidence"
+        if self.routing_request_pending:
+            return "submit_librarian_choice_or_state_no_match"
         return None
 
 
-def _match_payload(match: LibrarianMatch) -> dict:
-    """Serialise a configured librarian and the evidence supporting the match."""
+def _match_payload(match: LibrarianMatch, *, anonymous: bool = False) -> dict:
+    """Serialise a configured librarian and the evidence supporting the match.
+
+    ``anonymous`` drops the identity fields, leaving the id and the
+    evidence. It is set while a routing decision is pending: the text
+    withholds names so that primo_submit_librarian_choice is the only way
+    to obtain one, and metadata a caller reads just as easily would
+    otherwise hand back what the text declined to give.
+    """
     librarian = match.librarian
     semantic = is_semantic_match(match)
     reasoned = is_llm_match(match)
@@ -109,6 +123,13 @@ def _match_payload(match: LibrarianMatch) -> dict:
         evidence["reasoning"] = (
             match.matched_terms[0] if match.matched_terms else ""
         )
+
+    if anonymous:
+        return {
+            "id": librarian.id,
+            "title": librarian.title,
+            "evidence": evidence,
+        }
 
     return {
         "id": librarian.id,
@@ -159,7 +180,10 @@ def _search_tool_result(
                     _match_payload(match) for match in recommendation.matches
                 ],
                 "closest_configured_contacts": [
-                    _match_payload(match) for match in recommendation.near_misses
+                    _match_payload(
+                        match, anonymous=recommendation.routing_request_pending
+                    )
+                    for match in recommendation.near_misses
                 ],
             }
         )
@@ -324,6 +348,7 @@ async def _format_recommendations_for_records(
             llm_skipped=outcome.llm_skipped,
             llm_routing_request=outcome.llm_routing_request,
         ),
+        routing_request_pending=bool(outcome.llm_routing_request),
         matches=outcome.matches,
         near_misses=outcome.near_misses,
     )
@@ -463,6 +488,24 @@ async def primo_search(
                     "Caller action: You MUST include every recommended "
                     "librarian's name, title, contact, and evidence in the "
                     "user-facing response.\n\n"
+                    + recommendation.text
+                    + "\n\n## Primo search results\n\n"
+                    + result
+                )
+            elif recommendation.routing_request_pending:
+                # A routing request is owed work, exactly like a referral, so
+                # it leads the result instead of trailing several screens of
+                # hits and guidance. Appended last, it was the easiest thing
+                # in the response for a caller to never reach.
+                result = (
+                    "## Required librarian routing decision\n\n"
+                    "Caller action: keyword matching found no librarian for "
+                    "this query, so the decision is yours to make. Read the "
+                    "routing task below, then either call "
+                    "primo_submit_librarian_choice with the profiles that "
+                    "genuinely fit, or tell the user no configured librarian "
+                    "covers this topic. Deciding that none fits is a valid "
+                    "answer; silently skipping the decision is not.\n\n"
                     + recommendation.text
                     + "\n\n## Primo search results\n\n"
                     + result

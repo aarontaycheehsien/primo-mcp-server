@@ -503,10 +503,16 @@ async def test_caller_backend_returns_a_routing_request_not_a_match():
     assert result.error is None
     request = result.routing_request
     assert request is not None
-    assert "id=psych" in request and "id=law" in request
+    assert "Profile id: psych" in request and "Profile id: law" in request
     assert "primo_submit_librarian_choice" in request
-    # The caller must not name a librarian the validator has not returned.
-    assert "do not" in request.lower()
+    # The caller decides on expertise alone. Withholding the names is what
+    # makes primo_submit_librarian_choice the only route to a nameable
+    # librarian: a rule the caller reads while already holding the names
+    # is advisory over data in hand, which is how one gets ignored.
+    assert "Psychology Librarian" not in request
+    assert "Law Librarian" not in request
+    assert "psych@example.edu" not in request
+    assert "Behavioural Science Librarian" in request
     assert "An empty answer is correct" in request
 
 

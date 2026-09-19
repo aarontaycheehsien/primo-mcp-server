@@ -175,7 +175,18 @@ to the model already calling the server, which reasons and then submits its
 choice to `primo_submit_librarian_choice`. That tool runs `validate_choices`
 -- the single enforcement point shared by all three backends -- so the
 closed-vocabulary, deny-list, evidence and confidence rules apply no matter
-which model reasoned. Because nothing is called out to, this backend costs
+which model reasoned.
+
+While that decision is pending, the routing task and the near-miss block
+identify profiles by id and expertise only: no name, email or profile
+link, in the text or in `structuredContent`. Telling a caller not to name
+someone while handing it the names makes the rule advisory over data
+already in hand. Withholding them makes `primo_submit_librarian_choice`
+the only thing that can turn an id back into a person, so a caller that
+skips the tool produces no name rather than an unvalidated one. The
+anonymising is scoped to a pending decision -- an ordinary no-match still
+names its closest contacts, since no tool stands between the caller and
+a name there. Because nothing is called out to, this backend costs
 an inline search nothing, though like every recommendation switch it still
 ships off (PRIMO_LIBRARIAN_LLM_INLINE).
 

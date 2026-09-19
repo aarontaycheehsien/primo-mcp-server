@@ -1071,8 +1071,8 @@ def format_librarian_recommendations(
             # two conflicting permissions would be worse than none.
             lines.append(
                 "Closest configured profiles (scored below the confidence "
-                "threshold; evidence for your routing decision, NOT people "
-                "you may name):"
+                "threshold; evidence for your routing decision, identified "
+                "by id because they are NOT people you may name):"
                 if llm_routing_request
                 else "Closest configured profiles (scored below the "
                 "confidence threshold; NOT validated recommendations):"
@@ -1089,9 +1089,18 @@ def format_librarian_recommendations(
                     evidence = _llm_evidence(match, closest=True)
                 else:
                     evidence = _format_match_evidence(match)
-                lines.append(f"{i}. Name: {_format_linked_name(librarian)}")
-                lines.append(f"   Title: {librarian.title or _UNCONFIGURED}")
-                lines.append(f"   Contact: {librarian.email or _UNCONFIGURED}")
+                if llm_routing_request:
+                    # Withholding names in the routing task below is what
+                    # makes primo_submit_librarian_choice the only route to
+                    # a nameable librarian. Printing them here, a few lines
+                    # above that rule, would hand over the exact payload the
+                    # rule asks the caller not to use.
+                    lines.append(f"{i}. Profile id: {librarian.id}")
+                    lines.append(f"   Title: {librarian.title or _UNCONFIGURED}")
+                else:
+                    lines.append(f"{i}. Name: {_format_linked_name(librarian)}")
+                    lines.append(f"   Title: {librarian.title or _UNCONFIGURED}")
+                    lines.append(f"   Contact: {librarian.email or _UNCONFIGURED}")
                 lines.append(
                     f"   Evidence: {evidence} (below the confidence threshold)"
                 )
