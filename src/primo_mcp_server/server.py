@@ -29,6 +29,7 @@ from primo_mcp_server.formatter import (
 )
 from primo_mcp_server.librarian_embeddings import warm_up_local_embedder
 from primo_mcp_server.librarian_llm import (
+    LibrarianChoice,
     Reasoner,
     sampling_reasoner,
     validate_choices,
@@ -646,7 +647,7 @@ async def primo_recommend_librarians(
 async def primo_submit_librarian_choice(
     ctx: Context,
     query: str,
-    choices: list[dict],
+    choices: list[LibrarianChoice],
 ) -> str:
     """Validate a reasoned librarian choice and format it for the user.
 
@@ -668,7 +669,7 @@ async def primo_submit_librarian_choice(
         choices: One object per librarian, each with "id" (exact id from
             the configured directory), "confidence" (0-1, your own
             estimate), and "reason" (one sentence naming the expertise
-            that fits).
+            that fits). All three are required on every choice.
 
     Returns:
         A validated, evidence-bearing recommendation, or a rejection
@@ -681,8 +682,14 @@ async def primo_submit_librarian_choice(
     if message or directory is None:
         return f"Librarian directory unavailable: {message}"
 
+    # Over the wire FastMCP coerces each choice into LibrarianChoice, but an
+    # in-process caller may hand over the plain dicts the schema describes;
+    # primo_search accepts both forms of QueryClause for the same reason.
     matches = validate_choices(
-        list(choices or []),
+        [
+            choice.model_dump() if isinstance(choice, LibrarianChoice) else choice
+            for choice in choices or []
+        ],
         directory,
         query,
         config,

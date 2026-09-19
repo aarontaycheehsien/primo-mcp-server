@@ -311,6 +311,27 @@ async def test_transparency_survives_the_librarian_referral_prepend(tmp_path):
     assert result.structuredContent["search_transparency"]["total_results"] == 1
 
 
+async def test_submit_librarian_choice_publishes_its_contract_in_the_schema():
+    """The id/confidence/reason contract must survive in the JSON schema.
+
+    A client that reads the schema rather than the prose description has
+    nothing else to go on, and a guessed key name fails silently -- the
+    choice is dropped in validation and reads as "no librarian fits".
+    """
+    from primo_mcp_server.server import mcp
+
+    tools = {tool.name: tool for tool in await mcp.list_tools()}
+    schema = tools["primo_submit_librarian_choice"].inputSchema
+
+    choice = schema["$defs"]["LibrarianChoice"]
+    assert set(choice["required"]) == {"id", "confidence", "reason"}
+    assert choice["properties"]["confidence"]["type"] == "number"
+    # Each field carries its own description, so the contract does not
+    # depend on the caller having read the tool description.
+    for field in ("id", "confidence", "reason"):
+        assert choice["properties"][field]["description"].strip()
+
+
 def test_policy_text_states_the_transparency_obligation():
     from primo_mcp_server.policy import (
         PRIMO_SEARCH_DESCRIPTION,

@@ -38,6 +38,7 @@ from typing import Awaitable, Callable, NamedTuple, Sequence
 import httpx
 from mcp.shared.exceptions import McpError
 from mcp.types import METHOD_NOT_FOUND
+from pydantic import BaseModel, Field
 
 from primo_mcp_server.config import PrimoConfig
 from primo_mcp_server.librarians import (
@@ -232,6 +233,34 @@ def parse_choices(
     return validate_choices(choices, directory, query, config, limit=limit)
 
 
+# This model's docstring and Field descriptions are published in the tool's
+# JSON schema, so they are written for the calling model, not for us. The
+# reasoning behind the shape belongs here instead:
+#
+# The contract used to live only in the tool's prose description. A client
+# that leans on the schema rather than the description had to guess these
+# key names, and a wrong guess is indistinguishable from "no librarian fits"
+# by the time validate_choices drops the choice -- a silent failure.
+#
+# All three fields are required because validate_choices discards a pick
+# missing any of them; accepting one here would only defer the rejection to
+# a place where the caller learns less about what went wrong. Confidence is
+# deliberately left unconstrained: an overshooting estimate is clamped
+# downstream, which is friendlier than failing the whole call over 1.2.
+class LibrarianChoice(BaseModel):
+    """One librarian you are recommending, with the evidence for it."""
+
+    id: str = Field(
+        description="Exact librarian id from the configured directory."
+    )
+    confidence: float = Field(
+        description="Your own estimate that this profile fits, from 0 to 1."
+    )
+    reason: str = Field(
+        description="One sentence naming the expertise that fits the query."
+    )
+
+
 def validate_choices(
     choices: list,
     directory: LibrarianDirectory,
@@ -245,7 +274,9 @@ def validate_choices(
     Shared by every routing backend -- an HTTP completion, MCP sampling,
     and the caller-reasoned path -- so the closed-vocabulary, deny-list and
     evidence rules are enforced in exactly one place regardless of which
-    model did the reasoning.
+    model did the reasoning. Takes plain dicts because two of those three
+    backends build them by parsing raw model JSON, where any key may be
+    missing or the wrong type.
     """
     by_id = {profile.id: profile for profile in directory.librarians}
     matches: list[LibrarianMatch] = []
