@@ -24,29 +24,54 @@ and Unicode-safe handling for Chinese records.
 
 ## Quick Start for SMU
 
-Clone and install the fork:
+### 1. Requirements
+
+- Python 3.11 or later
+- Claude Code installed
+
+### 2. Install the Primo MCP server
 
 ```bash
 git clone https://github.com/aarontaycheehsien/primo-mcp-server.git
 cd primo-mcp-server
-pip install -e .
+python -m pip install -e .
 ```
 
-Register it in Claude Code by adding this to `~/.claude/settings.json`:
+SMU Primo settings are configured by default, so you do not need a `.env`
+file for basic use.
 
-```json
-{
-  "mcpServers": {
-    "primo": {
-      "command": "python",
-      "args": ["-m", "primo_mcp_server"]
-    }
-  }
-}
+### 3. Add it to Claude Code
+
+To make Primo available in all your Claude Code projects:
+
+```bash
+claude mcp add primo --scope user -- python -m primo_mcp_server
 ```
 
-Restart Claude Code. The tools will appear as `mcp__primo__primo_search`,
+For a shared project setup instead, use `--scope project`, which writes the
+server definition to the project's `.mcp.json`.
+
+### 4. Check that it is connected
+
+```bash
+claude mcp list
+```
+
+You should see `primo` listed. You can also type `/mcp` inside Claude Code
+to inspect MCP connections.
+
+The tools will appear with names such as `mcp__primo__primo_search`,
 `mcp__primo__primo_get_record`, and related tool names.
+
+### 5. Try it
+
+For example:
+
+> Search the SMU catalogue for books about poverty in Singapore.
+
+or
+
+> Search Everything for peer-reviewed articles on open access citation advantage.
 
 ## Development
 
