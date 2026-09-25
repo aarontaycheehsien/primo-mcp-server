@@ -43,6 +43,7 @@ from primo_mcp_server.librarians import (
     is_semantic_match,
     load_librarian_directory_cached,
     looks_like_identifier,
+    matcher_evidence,
 )
 from primo_mcp_server.policy import (
     PRIMO_SEARCH_DESCRIPTION,
@@ -335,7 +336,7 @@ async def _format_recommendations_for_records(
         embedding_timeout=embedding_timeout,
         reasoner=reasoner,
     )
-    _log_recommendation_outcome(config, query, outcome)
+    _log_recommendation_outcome(config, query, outcome, records)
     return FormattedRecommendation(
         status="matched" if outcome.matches else "no_match",
         text=format_librarian_recommendations(
@@ -355,7 +356,10 @@ async def _format_recommendations_for_records(
 
 
 def _log_recommendation_outcome(
-    config: PrimoConfig, query: str, outcome: RecommendationOutcome
+    config: PrimoConfig,
+    query: str,
+    outcome: RecommendationOutcome,
+    records=None,
 ) -> None:
     """Append one JSONL line per recommendation outcome (opt-in).
 
@@ -382,6 +386,7 @@ def _log_recommendation_outcome(
         "status": "matched" if outcome.matches else "no_match",
         "matches": [entry_for(match) for match in outcome.matches],
         "near_misses": [entry_for(near) for near in outcome.near_misses],
+        "records": [matcher_evidence(record) for record in records or []],
     }
     if outcome.semantic_error:
         entry["semantic_error"] = outcome.semantic_error

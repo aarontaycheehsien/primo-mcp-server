@@ -143,7 +143,10 @@ Args:
         alone it restricts results to that single year; for "2020 onwards"
         also set date_to (e.g. the current year).
     date_to: End year of a range (YYYY format, e.g. "2025"). Requires
-        date_from and must not be earlier than it.
+        date_from and must not be earlier than it. Primo applies the date
+        filter itself and it is not strict: a few records dated outside
+        the range can appear, so check each record's year before stating
+        that every result falls in the range.
     peer_reviewed: Set to true to show only peer-reviewed items.
     include_unavailable: Set to true to also include article-index (CDI)
         records the library has NO full text access to (Primo's "expanded"

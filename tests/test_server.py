@@ -819,6 +819,39 @@ async def test_recommendation_outcomes_are_logged_when_opted_in(tmp_path):
     assert "time" in matched
 
 
+def test_logged_records_carry_only_matcher_fields_and_replay_as_eval_case(tmp_path):
+    from primo_mcp_server.config import PrimoConfig
+    from primo_mcp_server.evaluate_recommendations import EvalCase
+    from primo_mcp_server.models import PrimoRecord
+    from primo_mcp_server.recommendation import RecommendationOutcome
+    from primo_mcp_server.librarians import EVIDENCE_TEXT_CAP as _LOGGED_TEXT_CAP
+    from primo_mcp_server.server import _log_recommendation_outcome
+
+    log_path = tmp_path / "recommend.jsonl"
+    record = PrimoRecord(
+        record_id="alma123",
+        doi="10.1/x",
+        title="Hospital outcomes",
+        subjects=["Medicine", "Social science"],
+        description="x" * (_LOGGED_TEXT_CAP + 500),
+    )
+    _log_recommendation_outcome(
+        PrimoConfig(_env_file=None, recommend_log_file=str(log_path)),
+        "medicine",
+        RecommendationOutcome([]),
+        [record],
+    )
+
+    entry = json.loads(log_path.read_text(encoding="utf-8"))
+    logged = entry["records"][0]
+    assert set(logged) == {"title", "subjects", "description"}
+    assert len(logged["description"]) == _LOGGED_TEXT_CAP
+    case = EvalCase.model_validate(
+        {"query": entry["query"], "records": entry["records"]}
+    )
+    assert case.records[0].subjects == ["Medicine", "Social science"]
+
+
 async def test_no_log_file_is_written_without_opt_in(tmp_path):
     await primo_search(
         _fake_context(

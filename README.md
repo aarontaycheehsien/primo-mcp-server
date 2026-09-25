@@ -80,6 +80,22 @@ pip install -e ".[dev]"
 pytest tests/ -v
 ```
 
+### Live checks
+
+Every test above mocks Primo. `tests/test_live_primo.py` instead calls the
+real SMU Primo API, one test per behaviour the code relies on: scope and tab
+names, query separators, date and resource-type filters, facets under
+concurrent searches, guest-token record lookup for Alma and CDI records,
+citation and export on real records, and autocomplete. They are skipped by
+default and never run in CI (about 30 requests per run):
+
+```bash
+pytest -m live -v
+```
+
+A failure means Primo behaves differently from what the code assumes, or
+that Primo has changed; investigate it rather than loosening the test.
+
 ## Tools
 
 | Tool | Description |
@@ -223,7 +239,7 @@ environment variables:
 | `PRIMO_LIBRARIANS_FILE` | unset | External JSON librarian directory used for recommendations |
 | `PRIMO_INLINE_LIBRARIAN_RECOMMENDATIONS` | `false` | Put matched, evidence-bearing librarian referrals before `primo_search` results. Off by default — every librarian switch ships off, since no profile data is bundled |
 | `PRIMO_LIBRARIAN_MIN_SCORE` | `5.0` | Minimum deterministic match score required before showing a recommendation |
-| `PRIMO_RECOMMEND_LOG_FILE` | unset | Opt-in JSONL log of recommendation outcomes (query, status, match/near-miss ids and scores) for triaging real queries into the golden eval set. Privacy note: this log captures raw user query text on local disk; enable it only with a retention policy in mind |
+| `PRIMO_RECOMMEND_LOG_FILE` | unset | Opt-in JSONL log of recommendation outcomes (query, status, match/near-miss ids and scores, and the matcher-relevant catalogue fields of the search records used as evidence) for triaging real queries into the golden eval set with `primo-triage`. Privacy note: this log captures raw user query text on local disk; enable it only with a retention policy in mind |
 | `PRIMO_LIBRARIAN_SEMANTIC_FALLBACK` | `false` | Enable the embedding path used when keyword matching finds nothing or matches weakly |
 | `PRIMO_EMBEDDING_PROVIDER` | `gemini` | `gemini` for Google's hosted API, `local` for an OpenAI-compatible local endpoint (Ollama, LM Studio, llama.cpp) with no quota |
 | `PRIMO_EMBEDDING_API_KEY` | unset | Google Gemini API key for the `gemini` provider (never sent to local endpoints) |
@@ -497,7 +513,40 @@ correct-rejection rate. `--keyword-only` forces the deterministic path;
 without it the semantic fallback runs exactly when the server would run it.
 `--min-pass-rate 0.9` turns the run into a regression gate (exit 1 below the
 threshold). The eval runs the same pipeline module the server uses, so its
-numbers are statements about real server behaviour.
+numbers are statements about real server behaviour. The report also counts
+cases with record evidence: cases without `records` never exercise the
+matcher's metadata path.
+
+To judge a change case by case rather than by one pass rate, save a run and
+compare a later one against it:
+
+```bash
+python -m primo_mcp_server.evaluate_recommendations librarian-eval.json --keyword-only --save-results baseline.json
+# ... change weights, thresholds or profiles ...
+python -m primo_mcp_server.evaluate_recommendations librarian-eval.json --keyword-only --compare baseline.json --fail-on-regression
+```
+
+The comparison lists cases that newly fail, newly pass, or pass or fail with
+a different top librarian; `--fail-on-regression` exits 1 if any case newly
+fails.
+
+#### Growing the eval set from real queries
+
+With `PRIMO_RECOMMEND_LOG_FILE` set, `primo-triage` walks new logged queries
+one at a time, shows what the server picked (scores, matched terms, near
+misses) and asks for the correct label: Enter accepts the server's answer,
+librarian ids override it, `-` means no librarian, `s` skips, `q` saves and
+quits. Every answer is saved immediately, and the search records logged with
+each query are stored in the case, so it replays the same evidence:
+
+```bash
+python -m primo_mcp_server.triage_recommendations recommend-outcomes.jsonl librarian-eval.json
+```
+
+Log lines written before records were logged carry none; add
+`--fetch-records` to run one live Primo search per such query and freeze its
+results into the case. `--since YYYY-MM-DD` limits the session to recent
+traffic.
 
 ## Usage Examples
 

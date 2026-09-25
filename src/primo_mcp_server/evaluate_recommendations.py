@@ -31,12 +31,16 @@ and offline instead of depending on live search results.
 Usage:
     python -m primo_mcp_server.evaluate_recommendations eval.json
         [--keyword-only] [--limit 3] [--min-pass-rate 0.9]
+        [--save-results run.json] [--compare baseline.json [--fail-on-regression]]
 
 The semantic fallback runs exactly when the server would run it (enabled,
 API key configured, keyword score weak), so with semantic enabled each
 weak-keyword case costs one query embedding. ``--keyword-only`` forces the
-deterministic path alone. Exit codes: 0 when the pass rate meets
-``--min-pass-rate`` (default 0, informational), 1 below it, 2 unusable
+deterministic path alone. ``--save-results`` keeps a run and ``--compare``
+diffs a later run against it case by case (newly failing, newly passing,
+top pick changed). Exit codes: 0 when the pass rate meets
+``--min-pass-rate`` (default 0, informational) and, with
+``--fail-on-regression``, no case newly fails; 1 otherwise; 2 unusable
 input.
 """
 
@@ -264,6 +268,10 @@ def _print_report(report: EvalReport, limit: int) -> None:
         print()
 
     print(f"Cases: {len(report.results)}")
+    with_records = sum(1 for r in report.results if r.case.records)
+    # Cases without records never exercise the metadata path, which is
+    # where the matcher's noise guards live.
+    print(f"Cases with record evidence: {with_records}/{len(report.results)}")
     if match_cases:
         top1 = sum(r.passed for r in match_cases)
         hits = sum(r.hit for r in match_cases)
@@ -298,6 +306,119 @@ def _print_report(report: EvalReport, limit: int) -> None:
     print(f"Overall pass rate: {report.pass_rate:.0%}")
 
 
+def query_key(query: str) -> str:
+    """Case- and whitespace-folded query, the identity of an eval case."""
+    return " ".join(query.split()).casefold()
+
+
+def results_payload(report: EvalReport) -> dict:
+    """A saved run: enough per case to diff a later run against."""
+    return {
+        "pass_rate": report.pass_rate,
+        "cases": [
+            {
+                "query": r.case.query,
+                "expect": r.case.expect,
+                "got_ids": r.got_ids,
+                "passed": r.passed,
+                "path": r.path,
+            }
+            for r in report.results
+        ],
+    }
+
+
+def _load_saved_results(path: str) -> tuple[dict | None, str | None]:
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except OSError as e:
+        return None, f"Cannot read {path}: {e}"
+    except json.JSONDecodeError as e:
+        return None, f"Invalid JSON in {path} at line {e.lineno}."
+    if not isinstance(data, dict) or not isinstance(data.get("cases"), list):
+        return None, f"{path} is not a saved eval run (no 'cases' list)."
+    return data, None
+
+
+class Comparison(BaseModel):
+    newly_failing: list[str] = Field(default_factory=list)
+    newly_passing: list[str] = Field(default_factory=list)
+    pick_changed: list[str] = Field(default_factory=list)
+    added: list[str] = Field(default_factory=list)
+    removed: list[str] = Field(default_factory=list)
+
+    @property
+    def unchanged(self) -> bool:
+        return not any(
+            (self.newly_failing, self.newly_passing, self.pick_changed,
+             self.added, self.removed)
+        )
+
+
+def compare_results(previous: dict, report: EvalReport) -> Comparison:
+    """Classify how each case moved since a saved run.
+
+    A changed top pick is reported even when the pass/fail verdict held:
+    a case that passes with a different librarian, or fails differently,
+    is exactly the silent drift a single pass rate hides.
+    """
+    before = {
+        query_key(str(case.get("query", ""))): case
+        for case in previous["cases"]
+        if isinstance(case, dict)
+    }
+    comparison = Comparison()
+    seen: set[str] = set()
+    for result in report.results:
+        key = query_key(result.case.query)
+        seen.add(key)
+        old = before.get(key)
+        if old is None:
+            comparison.added.append(result.case.query)
+            continue
+        old_passed = bool(old.get("passed"))
+        old_ids = list(old.get("got_ids") or [])
+        old_top = old_ids[0] if old_ids else None
+        new_top = result.got_ids[0] if result.got_ids else None
+        if old_passed and not result.passed:
+            comparison.newly_failing.append(
+                f"{result.case.query} (was {old_top or 'none'}, now {new_top or 'none'})"
+            )
+        elif result.passed and not old_passed:
+            comparison.newly_passing.append(
+                f"{result.case.query} (was {old_top or 'none'}, now {new_top or 'none'})"
+            )
+        elif old_top != new_top:
+            comparison.pick_changed.append(
+                f"{result.case.query} ({old_top or 'none'} -> {new_top or 'none'})"
+            )
+    comparison.removed = [
+        str(case.get("query", ""))
+        for key, case in before.items()
+        if key not in seen
+    ]
+    return comparison
+
+
+def _print_comparison(comparison: Comparison, path: str) -> None:
+    print(f"\nCompared with {path}:")
+    if comparison.unchanged:
+        print("  No changes.")
+        return
+    for label, items in (
+        ("Newly failing", comparison.newly_failing),
+        ("Newly passing", comparison.newly_passing),
+        ("Top pick changed", comparison.pick_changed),
+        ("Added cases", comparison.added),
+        ("Removed cases", comparison.removed),
+    ):
+        if items:
+            print(f"  {label} ({len(items)}):")
+            for item in items:
+                print(f"    - {item}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="primo-eval",
@@ -321,7 +442,31 @@ def main() -> None:
         default=0.0,
         help="Exit 1 when the overall pass rate falls below this (0-1).",
     )
+    parser.add_argument(
+        "--save-results",
+        metavar="PATH",
+        help="Write this run's per-case results as JSON, for a later --compare.",
+    )
+    parser.add_argument(
+        "--compare",
+        metavar="PATH",
+        help="Report cases that changed since a run saved with --save-results.",
+    )
+    parser.add_argument(
+        "--fail-on-regression",
+        action="store_true",
+        help="With --compare, exit 1 when any case is newly failing.",
+    )
     args = parser.parse_args()
+    if args.fail_on_regression and not args.compare:
+        parser.error("--fail-on-regression requires --compare")
+
+    previous = None
+    if args.compare:
+        previous, error = _load_saved_results(args.compare)
+        if error:
+            print(error, file=sys.stderr)
+            sys.exit(2)
 
     config, warning = _run_config(PrimoConfig(), args.keyword_only)
     if warning:
@@ -364,7 +509,23 @@ def main() -> None:
         )
     )
     _print_report(report, args.limit)
-    sys.exit(0 if report.pass_rate >= args.min_pass_rate else 1)
+
+    regressed = False
+    if previous is not None:
+        comparison = compare_results(previous, report)
+        _print_comparison(comparison, args.compare)
+        regressed = bool(comparison.newly_failing)
+    if args.save_results:
+        with open(args.save_results, "w", encoding="utf-8") as f:
+            json.dump(results_payload(report), f, indent=2)
+            f.write("\n")
+        print(f"Saved results to {args.save_results}")
+
+    if report.pass_rate < args.min_pass_rate:
+        sys.exit(1)
+    if args.fail_on_regression and regressed:
+        sys.exit(1)
+    sys.exit(0)
 
 
 if __name__ == "__main__":

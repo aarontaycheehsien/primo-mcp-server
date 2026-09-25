@@ -40,6 +40,7 @@ dev = [
 primo-mcp-server = "primo_mcp_server:main"
 primo-profiles = "primo_mcp_server.profile_tools:main"
 primo-eval = "primo_mcp_server.evaluate_recommendations:main"
+primo-triage = "primo_mcp_server.triage_recommendations:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/primo_mcp_server"]
@@ -47,3 +48,5 @@ packages = ["src/primo_mcp_server"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = ["live: calls the real SMU Primo API (run with: pytest -m live)"]
+addopts = "-m 'not live'"

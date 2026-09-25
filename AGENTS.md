@@ -30,13 +30,23 @@ This is the canonical agent guidance file for this fork.
 - `src/primo_mcp_server/calibrate_embeddings.py` -- CLI for calibrating semantic fallback thresholds
 - `src/primo_mcp_server/profile_tools.py` -- Curator CLI: convert a CSV profile source to JSON and lint the directory
 - `src/primo_mcp_server/recommendation.py` -- Combined keyword + semantic + LLM recommendation pipeline (shared by the server and the evaluation harness)
-- `src/primo_mcp_server/evaluate_recommendations.py` -- CLI benchmark: golden labelled queries against the recommendation pipeline
+- `src/primo_mcp_server/evaluate_recommendations.py` -- CLI benchmark: golden labelled queries against the recommendation pipeline; `--save-results` / `--compare` / `--fail-on-regression` diff runs case by case
+- `src/primo_mcp_server/triage_recommendations.py` -- Interactive CLI that turns logged live queries into labelled eval cases
 
 ## Running Tests
 
 ```bash
 uv sync --extra dev
 uv run pytest tests/ -v
+```
+
+`tests/test_live_primo.py` checks the real SMU Primo API (one assumption the
+code relies on per test). It is deselected by default and never runs in CI;
+run it on demand, and treat a failure as a finding about Primo or about the
+code's assumptions, not as a test to loosen:
+
+```bash
+uv run pytest -m live -v
 ```
 
 ## Configuration
@@ -207,17 +217,26 @@ as "closest configured contact", never as a recommendation. When nothing
 matched even weakly, route through `primo_list_librarians` and present the
 result as directory information without inventing evidence.
 
-When tuning matching weights or thresholds, run the golden-query benchmark
-before and after and report the delta:
+When tuning matching weights or thresholds, save a baseline before the
+change, then compare after it and report the delta (newly failing, newly
+passing, top pick changed):
 
 ```bash
-python -m primo_mcp_server.evaluate_recommendations librarian-eval.json --keyword-only
+python -m primo_mcp_server.evaluate_recommendations librarian-eval.json --keyword-only --save-results baseline.json
+python -m primo_mcp_server.evaluate_recommendations librarian-eval.json --keyword-only --compare baseline.json --fail-on-regression
 ```
 
 Set PRIMO_RECOMMEND_LOG_FILE to append a JSONL line per live recommendation
-outcome (query, status, match and near-miss ids with scores). Triage
-mis-routed or missed real queries from that log into `librarian-eval.json`;
-the golden set only stays meaningful if it grows from real traffic.
+outcome (query, status, match and near-miss ids with scores, and the
+matcher-relevant fields of the search records used as evidence). Label new
+real queries from that log into `librarian-eval.json` with the interactive
+triage command; the golden set only stays meaningful if it grows from real
+traffic, and cases carrying `records` are the only ones that exercise the
+metadata path:
+
+```bash
+python -m primo_mcp_server.triage_recommendations recommend-outcomes.jsonl librarian-eval.json
+```
 
 ## Conventions
 

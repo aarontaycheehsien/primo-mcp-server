@@ -490,3 +490,156 @@ def test_eval_set_saved_with_byte_order_mark_loads(tmp_path):
 
     assert error is None
     assert eval_set is not None and eval_set.cases[0].query == "law"
+
+
+# ---------------------------------------------------------------------------
+# Saved runs and regression comparison.
+# ---------------------------------------------------------------------------
+
+
+def _report(cases: list[tuple[str, list[str], list[str]]]):
+    """Build an EvalReport from (query, expect, got_ids) triples."""
+    from primo_mcp_server.evaluate_recommendations import (
+        CaseResult,
+        EvalCase,
+        EvalReport,
+    )
+
+    results = []
+    for query, expect, got in cases:
+        passed = (bool(got) and got[0] in expect) if expect else not got
+        results.append(
+            CaseResult(
+                case=EvalCase(query=query, expect=expect),
+                got_ids=got,
+                passed=passed,
+                hit=passed,
+                path="keyword" if got else "none",
+            )
+        )
+    return EvalReport(results=results)
+
+
+def test_compare_classifies_each_kind_of_change():
+    from primo_mcp_server.evaluate_recommendations import (
+        compare_results,
+        results_payload,
+    )
+
+    before = results_payload(
+        _report(
+            [
+                ("audit fees", ["accounting"], ["accounting"]),
+                ("case law", ["law"], ["accounting"]),
+                ("tax law", ["law"], ["law", "accounting"]),
+                ("marine biology", [], []),
+                ("dropped query", ["law"], ["law"]),
+            ]
+        )
+    )
+    after = _report(
+        [
+            ("Audit  Fees", ["accounting"], []),  # same case, folded key
+            ("case law", ["law"], ["law"]),
+            ("tax law", ["law", "accounting"], ["accounting"]),
+            ("marine biology", [], []),
+            ("new query", ["law"], ["law"]),
+        ]
+    )
+
+    comparison = compare_results(before, after)
+
+    assert comparison.newly_failing == ["Audit  Fees (was accounting, now none)"]
+    assert comparison.newly_passing == ["case law (was accounting, now law)"]
+    assert comparison.pick_changed == ["tax law (law -> accounting)"]
+    assert comparison.added == ["new query"]
+    assert comparison.removed == ["dropped query"]
+    assert not comparison.unchanged
+
+
+def test_identical_runs_compare_as_unchanged():
+    from primo_mcp_server.evaluate_recommendations import (
+        compare_results,
+        results_payload,
+    )
+
+    report = _report([("audit fees", ["accounting"], ["accounting"])])
+
+    assert compare_results(results_payload(report), report).unchanged
+
+
+def test_saved_results_round_trip_through_the_cli(tmp_path, monkeypatch, capsys):
+    import json
+    import sys
+
+    import pytest
+
+    from primo_mcp_server import evaluate_recommendations as ev
+
+    directory_path = tmp_path / "librarians.json"
+    directory_path.write_text(
+        json.dumps(_directory().model_dump()), encoding="utf-8"
+    )
+    eval_path = tmp_path / "eval.json"
+    eval_path.write_text(
+        json.dumps(
+            {"cases": [{"query": "accounting datasets for audit fees",
+                        "expect": ["accounting"]}]}
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        ev, "PrimoConfig",
+        lambda: PrimoConfig(_env_file=None, librarians_file=str(directory_path)),
+    )
+    baseline = tmp_path / "baseline.json"
+
+    def run(*extra: str) -> int:
+        monkeypatch.setattr(sys, "argv", ["primo-eval", str(eval_path), *extra])
+        with pytest.raises(SystemExit) as exc_info:
+            ev.main()
+        return exc_info.value.code
+
+    assert run("--save-results", str(baseline)) == 0
+    assert json.loads(baseline.read_text())["cases"][0]["got_ids"] == ["accounting"]
+
+    assert run("--compare", str(baseline), "--fail-on-regression") == 0
+    assert "No changes." in capsys.readouterr().out
+
+    # Relabel the case so the same output now fails: a regression.
+    eval_path.write_text(
+        json.dumps(
+            {"cases": [{"query": "accounting datasets for audit fees",
+                        "expect": ["law"]}]}
+        ),
+        encoding="utf-8",
+    )
+    assert run("--compare", str(baseline), "--fail-on-regression") == 1
+    assert "Newly failing (1)" in capsys.readouterr().out
+
+
+def test_report_counts_cases_with_record_evidence(capsys):
+    from primo_mcp_server.evaluate_recommendations import (
+        CaseResult,
+        EvalCase,
+        EvalReport,
+        _print_report,
+    )
+    from primo_mcp_server.models import PrimoRecord
+
+    report = EvalReport(
+        results=[
+            CaseResult(
+                case=EvalCase(query="a", records=[PrimoRecord(title="t")]),
+                got_ids=[], passed=True, hit=False, path="none",
+            ),
+            CaseResult(
+                case=EvalCase(query="b"),
+                got_ids=[], passed=True, hit=False, path="none",
+            ),
+        ]
+    )
+
+    _print_report(report, 3)
+
+    assert "Cases with record evidence: 1/2" in capsys.readouterr().out

@@ -622,6 +622,41 @@ def _record_texts(record: PrimoRecord) -> dict[str, list[str]]:
     }
 
 
+# The PrimoRecord fields _record_texts reads. Logged and triaged eval cases
+# keep exactly these, so a replayed case carries the evidence the live
+# decision saw.
+MATCHER_RECORD_FIELDS = (
+    "title",
+    "subjects",
+    "keywords",
+    "description",
+    "snippet",
+    "resource_type",
+    "source_label",
+    "publisher",
+    "journal_title",
+    "is_part_of",
+)
+EVIDENCE_TEXT_CAP = 1500
+
+
+def matcher_evidence(record: PrimoRecord) -> dict:
+    """A record reduced to the matcher's fields, as PrimoRecord keys.
+
+    Empty fields are dropped and long prose is capped so a JSONL log line
+    stays small; the dict loads straight back as a PrimoRecord.
+    """
+    entry: dict = {}
+    for name in MATCHER_RECORD_FIELDS:
+        value = getattr(record, name)
+        if not value:
+            continue
+        if name in ("description", "snippet"):
+            value = value[:EVIDENCE_TEXT_CAP]
+        entry[name] = value
+    return entry
+
+
 def _record_field_texts(records: list[PrimoRecord]) -> dict[str, list[str]]:
     fields: dict[str, list[str]] = {
         "title": [],
