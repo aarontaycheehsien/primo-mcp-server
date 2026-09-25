@@ -139,8 +139,11 @@ Args:
     limit: Number of results to return (1-50, default 10).
     offset: Pagination offset (default 0). Use to get the next page of results.
     resource_type: Filter by type -- "books", "articles", "journals", "databases", "videos", "dissertations", "conference_proceedings".
-    date_from: Start year filter (YYYY format, e.g. "2020").
-    date_to: End year filter (YYYY format, e.g. "2025").
+    date_from: Publication year filter (YYYY format, e.g. "2020"). Given
+        alone it restricts results to that single year; for "2020 onwards"
+        also set date_to (e.g. the current year).
+    date_to: End year of a range (YYYY format, e.g. "2025"). Requires
+        date_from and must not be earlier than it.
     peer_reviewed: Set to true to show only peer-reviewed items.
     include_unavailable: Set to true to also include article-index (CDI)
         records the library has NO full text access to (Primo's "expanded"
@@ -177,8 +180,10 @@ Args:
 
 Returns:
     Formatted search results with title, authors, year, identifiers,
-    availability, shelf locations and access links where known, a "Result
-    landscape" facet summary when Primo serves facets, and any bottom
-    "Recommended librarian help:" section.
+    availability, shelf locations and access links where known, and a
+    "Result landscape" facet summary when Primo serves facets. When inline
+    librarian recommendations are enabled, a matched referral or a routing
+    decision request leads the result; any other librarian status follows
+    the results as a "Recommended librarian help:" section.
 """
 )

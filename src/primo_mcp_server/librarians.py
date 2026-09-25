@@ -29,14 +29,6 @@ _RECOMMENDATION_FOOTER = (
 _UNCONFIGURED = "Not configured"
 _NOISY_METADATA_FIELDS = {"description", "source"}
 _HIGH_SIGNAL_METADATA_FIELDS = {"subjects", "keywords"}
-_GENERIC_METADATA_TERMS = {
-    "analysis",
-    "data",
-    "policy",
-    "research",
-    "social science",
-    "support",
-}
 
 
 class LibrarianProfile(BaseModel):
@@ -103,7 +95,8 @@ def load_librarian_directory(
 
     resolved = Path(path).expanduser()
     try:
-        with resolved.open(encoding="utf-8") as f:
+        # utf-8-sig also accepts files saved with a byte-order mark.
+        with resolved.open(encoding="utf-8-sig") as f:
             data = json.load(f)
     except FileNotFoundError:
         return None, _configuration_message(
@@ -378,6 +371,22 @@ def _stem(token: str) -> str:
 @lru_cache(maxsize=4096)
 def _normalise_text(value: str) -> str:
     return " ".join(_stem(token) for token in _TOKEN_RE.findall(value.casefold()))
+
+
+# Terms too weak to trust from noisy record metadata. Stored normalised:
+# every lookup compares _normalise_text(term), and raw spellings such as
+# "policy" (stem "polici") would never match.
+_GENERIC_METADATA_TERMS = frozenset(
+    _normalise_text(term)
+    for term in (
+        "analysis",
+        "data",
+        "policy",
+        "research",
+        "social science",
+        "support",
+    )
+)
 
 
 # Universal filler words carry no routing signal from ANY evidence field,

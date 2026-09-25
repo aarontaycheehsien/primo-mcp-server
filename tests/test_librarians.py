@@ -10,6 +10,8 @@ from pathlib import Path
 from primo_mcp_server.librarians import (
     LibrarianDirectory,
     LibrarianMatch,
+    _GENERIC_METADATA_TERMS,
+    _normalise_text,
     _stem,
     _term_specificity,
     format_librarian_recommendations,
@@ -75,6 +77,20 @@ def test_load_librarian_directory_from_json(tmp_path):
     assert message is None
     assert directory is not None
     assert directory.librarians[0].name == "Business Librarian"
+
+
+def test_directory_saved_with_byte_order_mark_loads(tmp_path):
+    path = tmp_path / "librarians.json"
+    path.write_text(
+        json.dumps({"librarians": [{"id": "a", "name": "A"}]}),
+        encoding="utf-8-sig",
+    )
+
+    directory, message = load_librarian_directory(path)
+
+    assert message is None
+    assert directory is not None
+    assert directory.librarians[0].id == "a"
 
 
 def test_missing_librarian_file_returns_guidance(tmp_path):
@@ -397,6 +413,40 @@ def test_generic_source_and_description_terms_do_not_drive_recommendation():
             description="A record from a social science collection.",
             source_label="ProQuest research library",
         )
+    ]
+
+    assert recommend_librarians(directory, "medicine", records) == []
+
+
+def test_generic_terms_are_stored_normalised():
+    # Every lookup normalises the term first; a raw spelling whose stem
+    # differs ("policy" -> "polici") would silently never match.
+    for term in _GENERIC_METADATA_TERMS:
+        assert _normalise_text(term) == term
+
+
+def test_generic_subject_across_records_does_not_drive_recommendation():
+    # Two records sharing a generic subject clear the "two supporting
+    # records" gate, so the generic-term guard is what must stop this.
+    directory = LibrarianDirectory.model_validate(
+        {
+            "librarians": [
+                {
+                    "id": "social",
+                    "name": "Social Science Librarian",
+                    "subjects": ["Social Science"],
+                },
+                {
+                    "id": "policy",
+                    "name": "Policy Librarian",
+                    "subjects": ["policy"],
+                },
+            ]
+        }
+    )
+    records = [
+        PrimoRecord(title="Hospital outcomes", subjects=["Social science", "Policy"]),
+        PrimoRecord(title="Clinical trials", subjects=["Social science", "Policy"]),
     ]
 
     assert recommend_librarians(directory, "medicine", records) == []

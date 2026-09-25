@@ -51,7 +51,9 @@ from pydantic import BaseModel, Field, ValidationError
 
 from primo_mcp_server.config import PrimoConfig
 from primo_mcp_server.librarians import (
+    _MAX_RECOMMENDATIONS,
     LibrarianDirectory,
+    is_llm_match,
     is_semantic_match,
     load_librarian_directory_cached,
     looks_like_identifier,
@@ -78,9 +80,11 @@ class CaseResult(BaseModel):
     got_ids: list[str]
     passed: bool
     hit: bool
-    path: str  # "identifier-skip", "keyword", "semantic", "mixed", "none"
+    path: str  # "identifier-skip", "keyword", "semantic", "llm", "mixed", "none"
     semantic_error: str | None = None
     semantic_skipped: str | None = None
+    llm_error: str | None = None
+    llm_skipped: str | None = None
 
 
 class EvalReport(BaseModel):
@@ -95,7 +99,7 @@ class EvalReport(BaseModel):
 
 def _load_eval_set(path: str) -> tuple[EvalSet | None, str | None]:
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             data = json.load(f)
     except OSError as e:
         return None, f"Cannot read {path}: {e}"
@@ -128,15 +132,53 @@ def _unknown_expect_ids(
     return unknown
 
 
-def _match_path(result_matches, semantic_skipped: str | None) -> str:
+def _match_path(result_matches) -> str:
     if not result_matches:
         return "none"
-    semantic = [is_semantic_match(match) for match in result_matches]
-    if all(semantic):
-        return "semantic"
-    if any(semantic):
-        return "mixed"
-    return "keyword"
+    tiers = {
+        "semantic" if is_semantic_match(match)
+        else "llm" if is_llm_match(match)
+        else "keyword"
+        for match in result_matches
+    }
+    return tiers.pop() if len(tiers) == 1 else "mixed"
+
+
+# Providers that need a live MCP session; the offline harness has none.
+_SESSION_ONLY_LLM_PROVIDERS = {"caller", "sampling"}
+
+
+def _run_config(config: PrimoConfig, keyword_only: bool) -> tuple[PrimoConfig, str | None]:
+    """Config for the benchmark run, plus a warning to print if any.
+
+    ``--keyword-only`` must switch off BOTH fallback tiers, or an enabled
+    LLM tier would still add matches to a supposedly keyword-only number.
+    """
+    if keyword_only:
+        return (
+            config.model_copy(
+                update={
+                    "librarian_semantic_fallback": False,
+                    "librarian_llm_fallback": False,
+                }
+            ),
+            None,
+        )
+    provider = config.llm_provider.strip().lower()
+    if config.librarian_llm_fallback and provider in _SESSION_ONLY_LLM_PROVIDERS:
+        return (
+            config.model_copy(update={"librarian_llm_fallback": False}),
+            f'Warning: the LLM fallback provider "{provider}" needs a live MCP '
+            "session, so the LLM tier is off for this run. Set "
+            "PRIMO_LLM_PROVIDER=openai to measure it offline.",
+        )
+    return config, None
+
+
+def _llm_status(config: PrimoConfig) -> str:
+    if not config.librarian_llm_fallback:
+        return "off"
+    return f"on ({config.llm_provider.strip().lower()})"
 
 
 async def evaluate(
@@ -184,9 +226,11 @@ async def evaluate(
                 got_ids=got_ids,
                 passed=passed,
                 hit=hit,
-                path=_match_path(outcome.matches, outcome.semantic_skipped),
+                path=_match_path(outcome.matches),
                 semantic_error=outcome.semantic_error,
                 semantic_skipped=outcome.semantic_skipped,
+                llm_error=outcome.llm_error,
+                llm_skipped=outcome.llm_skipped,
             )
         )
     return EvalReport(results=results)
@@ -210,6 +254,10 @@ def _print_report(report: EvalReport, limit: int) -> None:
                 line += f" (semantic error: {result.semantic_error})"
             elif result.semantic_skipped:
                 line += f" (semantic skipped: {result.semantic_skipped})"
+            if result.llm_error:
+                line += f" (LLM error: {result.llm_error})"
+            elif result.llm_skipped:
+                line += f" (LLM skipped: {result.llm_skipped})"
             if result.case.note:
                 line += f" -- {result.case.note}"
             print(line)
@@ -219,11 +267,13 @@ def _print_report(report: EvalReport, limit: int) -> None:
     if match_cases:
         top1 = sum(r.passed for r in match_cases)
         hits = sum(r.hit for r in match_cases)
+        # The pipeline caps every request, so a larger --limit returns no more.
+        shown = min(max(1, limit), _MAX_RECOMMENDATIONS)
         print(
             f"Match cases: {len(match_cases)}  "
             f"top-1 accuracy: {top1}/{len(match_cases)} "
             f"({top1 / len(match_cases):.0%})  "
-            f"hit@{limit}: {hits}/{len(match_cases)} "
+            f"hit@{shown}: {hits}/{len(match_cases)} "
             f"({hits / len(match_cases):.0%})"
         )
     if no_match_cases:
@@ -238,6 +288,12 @@ def _print_report(report: EvalReport, limit: int) -> None:
         print(
             f"Warning: the semantic fallback errored on {semantic_errors} "
             "case(s); those cases measured the keyword path only."
+        )
+    llm_errors = sum(1 for r in report.results if r.llm_error)
+    if llm_errors:
+        print(
+            f"Warning: the LLM fallback errored on {llm_errors} case(s); "
+            "those cases did not measure the LLM tier."
         )
     print(f"Overall pass rate: {report.pass_rate:.0%}")
 
@@ -267,11 +323,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    config = PrimoConfig()
-    if args.keyword_only:
-        config = config.model_copy(
-            update={"librarian_semantic_fallback": False}
-        )
+    config, warning = _run_config(PrimoConfig(), args.keyword_only)
+    if warning:
+        print(warning, file=sys.stderr)
 
     directory, message, specificity = load_librarian_directory_cached(
         config.librarians_file
@@ -297,7 +351,8 @@ def main() -> None:
     print(
         f"Directory: {config.librarians_file} "
         f"({len(directory.librarians)} profiles)  "
-        f"semantic fallback: {'on' if config.librarian_semantic_fallback else 'off'}"
+        f"semantic fallback: {'on' if config.librarian_semantic_fallback else 'off'}  "
+        f"LLM fallback: {_llm_status(config)}"
     )
     report = asyncio.run(
         evaluate(

@@ -6,6 +6,7 @@ from primo_mcp_server.config import PrimoConfig
 from primo_mcp_server.evaluate_recommendations import (
     EvalSet,
     _load_eval_set,
+    _run_config,
     _unknown_expect_ids,
     evaluate,
 )
@@ -407,3 +408,85 @@ async def test_llm_tier_error_reaches_the_outcome(monkeypatch):
 
     assert outcome.llm_error == "ConnectError"
     assert [near.librarian.id for near in outcome.near_misses] == ["accounting"]
+
+
+# ---------------------------------------------------------------------------
+# Benchmark reporting of the LLM tier.
+# ---------------------------------------------------------------------------
+
+
+async def test_evaluate_reports_llm_matches_as_llm_path(monkeypatch):
+    from primo_mcp_server.librarian_llm import LlmFallbackResult
+    from primo_mcp_server.librarians import LibrarianMatch
+
+    directory = _llm_directory()
+    reasoned = LibrarianMatch(
+        librarian=directory.librarians[1],
+        score=0.83,
+        matched_terms=["autism is behavioural science"],
+        evidence_fields=["llm"],
+    )
+    _patch_llm(monkeypatch, LlmFallbackResult([reasoned]))
+
+    report = await evaluate(
+        _eval_set([{"query": "autism", "expect": ["psych"]}]),
+        directory,
+        _llm_config(llm_provider="openai"),
+    )
+
+    assert report.results[0].path == "llm"
+
+
+async def test_evaluate_carries_llm_errors_into_results(monkeypatch):
+    from primo_mcp_server.librarian_llm import LlmFallbackResult
+
+    _patch_llm(monkeypatch, LlmFallbackResult([], error="ConnectError"))
+
+    report = await evaluate(
+        _eval_set([{"query": "autism", "expect": ["psych"]}]),
+        _llm_directory(),
+        _llm_config(llm_provider="openai"),
+    )
+
+    assert report.results[0].llm_error == "ConnectError"
+
+
+def test_keyword_only_switches_off_both_fallback_tiers():
+    config, warning = _run_config(
+        _llm_config(librarian_semantic_fallback=True, llm_provider="openai"),
+        keyword_only=True,
+    )
+
+    assert config.librarian_semantic_fallback is False
+    assert config.librarian_llm_fallback is False
+    assert warning is None
+
+
+def test_session_only_llm_provider_is_switched_off_with_a_warning():
+    config, warning = _run_config(
+        _llm_config(llm_provider="caller"), keyword_only=False
+    )
+
+    assert config.librarian_llm_fallback is False
+    assert warning is not None and "caller" in warning
+
+
+def test_openai_llm_provider_stays_on_for_a_full_run():
+    config, warning = _run_config(
+        _llm_config(llm_provider="openai"), keyword_only=False
+    )
+
+    assert config.librarian_llm_fallback is True
+    assert warning is None
+
+
+def test_eval_set_saved_with_byte_order_mark_loads(tmp_path):
+    path = tmp_path / "eval.json"
+    path.write_text(
+        '{"cases": [{"query": "law", "expect": ["law"]}]}', encoding="utf-8-sig"
+    )
+
+    eval_set, error = _load_eval_set(str(path))
+
+    assert error is None
+    assert eval_set is not None and eval_set.cases[0].query == "law"

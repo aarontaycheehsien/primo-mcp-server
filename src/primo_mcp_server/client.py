@@ -264,8 +264,8 @@ class PrimoClient:
             limit: Number of results (capped at max_results_per_request).
             offset: Pagination offset.
             resource_type: Filter by type (books, articles, journals, etc.).
-            date_from: Start year (YYYY).
-            date_to: End year (YYYY).
+            date_from: Year (YYYY). Alone, it restricts to that single year.
+            date_to: End year (YYYY) of a range; requires date_from.
             peer_reviewed: Filter to peer-reviewed items only.
             include_unavailable: Include CDI records the institution has no
                 full text access to (Primo's pcAvailability "expanded"

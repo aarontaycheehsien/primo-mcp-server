@@ -635,8 +635,10 @@ async def primo_recommend_librarians(
         search_limit: Number of Primo records to inspect when searching.
             Defaults to 5 and is capped by the Primo client.
         resource_type: Optional Primo resource type filter.
-        date_from: Optional start year filter in YYYY format.
-        date_to: Optional end year filter in YYYY format.
+        date_from: Optional publication year in YYYY format. Given alone it
+            restricts to that single year; set date_to as well for a range.
+        date_to: Optional end year of a range in YYYY format. Requires
+            date_from.
         peer_reviewed: Set to true to inspect only peer-reviewed items.
         include_unavailable: Set to true to include CDI records without full
             text access when searching for context.
@@ -812,8 +814,10 @@ async def primo_rag_retrieve(
         field: Search field -- "any" (default), "title", "creator", "sub".
         scope: "everything" (default, catalogue + subscribed databases) or "catalogue".
         resource_type: Optional Primo resource type filter (e.g. "articles").
-        date_from: Optional start year filter in YYYY format.
-        date_to: Optional end year filter in YYYY format.
+        date_from: Optional publication year in YYYY format. Given alone it
+            restricts to that single year; set date_to as well for a range.
+        date_to: Optional end year of a range in YYYY format. Requires
+            date_from.
         peer_reviewed: Set to true to retrieve only peer-reviewed items.
         style: Citation style for the code-built reference list --
             "apa7" (default), "harvard", "chicago", "ieee", "vancouver".

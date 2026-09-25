@@ -9,10 +9,12 @@ of trusting the SMU-tuned defaults.
 Usage:
     python -m primo_mcp_server.calibrate_embeddings "query one" "query two"
 
-Requires PRIMO_LIBRARIANS_FILE, PRIMO_LIBRARIAN_SEMANTIC_FALLBACK=true, and
-PRIMO_EMBEDDING_API_KEY (via environment or .env). Profile embeddings are
-cached the same way the server caches them, so repeated runs only embed the
-queries.
+Requires PRIMO_LIBRARIANS_FILE, plus PRIMO_EMBEDDING_API_KEY when
+PRIMO_EMBEDDING_PROVIDER is "gemini" (the "local" provider needs no key).
+Profile embeddings are cached the same way the server caches them, so
+repeated runs only embed the queries. Profiles a curator deny-list would
+suppress for a query are marked EXCL, as the server drops them after
+acceptance.
 """
 
 from __future__ import annotations
@@ -22,8 +24,8 @@ import asyncio
 import sys
 
 from primo_mcp_server.config import PrimoConfig
-from primo_mcp_server.librarian_embeddings import _accepted, score_profiles
-from primo_mcp_server.librarians import load_librarian_directory
+from primo_mcp_server.librarian_embeddings import _accepted, _provider, score_profiles
+from primo_mcp_server.librarians import is_excluded, load_librarian_directory
 
 
 async def _run(queries: list[str]) -> int:
@@ -32,14 +34,20 @@ async def _run(queries: list[str]) -> int:
     if message or directory is None:
         print(message, file=sys.stderr)
         return 1
-    if not config.embedding_api_key:
+    provider = _provider(config)
+    if provider == "gemini" and not config.embedding_api_key:
         print("PRIMO_EMBEDDING_API_KEY is not configured.", file=sys.stderr)
         return 1
+    model = (
+        f"{config.embedding_local_model} (local, {config.embedding_local_url})"
+        if provider == "local"
+        else config.embedding_model
+    )
 
     print(
         f"Directory: {config.librarians_file} "
         f"({len(directory.librarians)} profiles)\n"
-        f"Model: {config.embedding_model}"
+        f"Model: {model}"
         + (
             f" @ {config.embedding_dimensions} dims"
             if config.embedding_dimensions
@@ -73,7 +81,12 @@ async def _run(queries: list[str]) -> int:
         else:
             print()
         for entry in ranked:
-            marker = "ACCEPT" if entry.librarian.id in accepted_ids else "      "
+            if is_excluded(entry.librarian, query):
+                marker = "EXCL  "
+            elif entry.librarian.id in accepted_ids:
+                marker = "ACCEPT"
+            else:
+                marker = "      "
             topic = f'  best term: "{entry.best_term}"' if entry.best_term else ""
             print(
                 f"  {marker}  {entry.similarity:.4f}  "
