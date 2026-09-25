@@ -163,6 +163,18 @@ async def test_confidence_below_the_floor_is_rejected():
     assert result.matches == []
 
 
+async def test_nan_confidence_is_rejected():
+    """NaN compares False against the floor and must not slip through."""
+    async def call(_prompt: str) -> str:
+        return '{"choices": [{"id": "psych", "confidence": NaN, "reason": "x"}]}'
+
+    result = await llm_fallback(
+        _directory(), "autism", None, _config(), reasoner=call
+    )
+
+    assert result.matches == []
+
+
 async def test_matches_are_capped_and_ordered_by_confidence():
     result = await llm_fallback(
         _directory(),

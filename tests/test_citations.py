@@ -1,6 +1,6 @@
 """Tests for citation formatting."""
 
-from primo_mcp_server.citations import format_citation
+from primo_mcp_server.citations import format_citation, invalid_style_message
 from primo_mcp_server.models import PrimoRecord, SearchResponse
 
 
@@ -62,6 +62,24 @@ class TestCitations:
         citation = format_citation(self._make_article(), "ieee")
         assert "J. Smith" in citation
         assert "doi:" in citation
+
+    def test_two_authors_join_with_and_no_comma(self):
+        chicago = format_citation(self._make_article(), "chicago")
+        ieee = format_citation(self._make_article(), "ieee")
+        assert chicago.startswith("Smith, J. and Jones, M.")
+        assert ieee.startswith("J. Smith and M. Jones,")
+
+    def test_three_authors_keep_serial_comma(self):
+        record = self._make_article().model_copy(
+            update={"authors_structured": ["Smith, John", "Jones, Mary", "Lee, Kim"]}
+        )
+        assert format_citation(record, "ieee").startswith(
+            "J. Smith, M. Jones, and K. Lee,"
+        )
+
+    def test_invalid_style_message(self):
+        assert invalid_style_message("APA7") is None
+        assert "Invalid citation style" in invalid_style_message("mla")
 
     def test_vancouver_article(self):
         citation = format_citation(self._make_article(), "vancouver")

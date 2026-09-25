@@ -250,10 +250,36 @@ _IDENTIFIER_PATTERNS = (
     re.compile(r"\bdoi\s*:", re.IGNORECASE),
     re.compile(r"\bisbn\s*:?\s*[\d\- ]{9,17}[\dxX]\b", re.IGNORECASE),
     re.compile(r"\bissn\s*:?\s*\d{4}-?\d{3}[\dxX]\b", re.IGNORECASE),
-    re.compile(r"\b\d{4}-\d{3}[\dxX]\b"),  # bare ISSN
     re.compile(r"\balma\d{6,}\b", re.IGNORECASE),  # Alma MMS record id
     re.compile(r"\bcdi_\w+", re.IGNORECASE),  # CDI record id
 )
+
+_BARE_ISSN_RE = re.compile(r"\b(\d{4})-(\d{3}[\dxX])\b")
+
+
+def _is_valid_issn(head: str, tail: str) -> bool:
+    digits = head + tail[:3]
+    total = sum(int(d) * w for d, w in zip(digits, range(8, 1, -1)))
+    check = (11 - total % 11) % 11
+    return tail[3].upper() == ("X" if check == 10 else str(check))
+
+
+def _looks_like_year_range(head: str, tail: str) -> bool:
+    if not tail.isdigit():
+        return False
+    start, end = int(head), int(tail)
+    return 1000 <= start < end <= 2099
+
+
+def _contains_bare_issn(text: str) -> bool:
+    """A bare NNNN-NNNC that passes the ISSN checksum and is not a year span.
+
+    Without both checks "1939-1945" in a topical query reads as an ISSN.
+    """
+    return any(
+        _is_valid_issn(head, tail) and not _looks_like_year_range(head, tail)
+        for head, tail in _BARE_ISSN_RE.findall(text)
+    )
 
 
 def looks_like_identifier(query: str) -> bool:
@@ -270,7 +296,9 @@ def looks_like_identifier(query: str) -> bool:
     compact = re.sub(r"[\s\-]", "", text)
     if re.fullmatch(r"\d{9,13}|\d{9,12}[xX]", compact):
         return True
-    return any(pattern.search(text) for pattern in _IDENTIFIER_PATTERNS)
+    return _contains_bare_issn(text) or any(
+        pattern.search(text) for pattern in _IDENTIFIER_PATTERNS
+    )
 
 
 _SNOWBALL = snowballstemmer.stemmer("english")

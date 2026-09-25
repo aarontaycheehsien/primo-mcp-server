@@ -16,7 +16,7 @@ import httpx
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import CallToolResult, TextContent
 
-from primo_mcp_server.citations import format_citation
+from primo_mcp_server.citations import format_citation, invalid_style_message
 from primo_mcp_server.client import PrimoAPIError, PrimoClient
 from primo_mcp_server.config import PrimoConfig
 from primo_mcp_server.exporters import export_bibtex, export_csv, export_ris
@@ -821,6 +821,10 @@ async def primo_rag_retrieve(
     Returns:
         Session id, R#-labelled source records, and drafting rules.
     """
+    style_error = invalid_style_message(style)
+    if style_error:
+        return style_error
+    style = style.strip().lower()
     try:
         client = _get_client(ctx)
         limit = max(1, min(limit, 10))
@@ -923,10 +927,10 @@ async def primo_cite(
     Returns:
         Formatted citations. Note: always verify generated citations before submission.
     """
-    valid_styles = {"apa7", "harvard", "chicago", "ieee", "vancouver"}
+    style_error = invalid_style_message(style)
+    if style_error:
+        return style_error
     style = style.strip().lower()
-    if style not in valid_styles:
-        return f'Invalid citation style "{style}". Use one of: {", ".join(sorted(valid_styles))}'
 
     client = _get_client(ctx)
     records = await client.get_records(record_ids)

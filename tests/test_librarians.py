@@ -914,6 +914,9 @@ def test_looks_like_identifier_leaves_topics_alone():
         "history of singapore 1965",
         "top 10 accounting journals",
         "covid-19 policy response",
+        "Singapore economic history 1965-1975",
+        "world war 1939-1945",
+        "2019-2023 annual reports",
         "",
     ]
     for query in topics:

@@ -230,6 +230,19 @@ def _clause_fields(clause: Any, position: int) -> dict:
     )
 
 
+def clean_query_value(value: str) -> str:
+    """Replace Primo clause separators in a search value and collapse spaces.
+
+    Separator characters would splice into Primo's clause syntax.
+    """
+    return " ".join(_CLAUSE_SEPARATOR_CHARS_RE.sub(" ", value).split())
+
+
+def single_query(field: str, query: str) -> str:
+    """The Primo ``field,contains,value`` clause for a plain search."""
+    return f"{field},contains,{clean_query_value(query)}"
+
+
 def query_clause_parts(clauses: Sequence[Any]) -> list[str]:
     """Compile structured clauses into Primo clause strings.
 
@@ -249,9 +262,7 @@ def query_clause_parts(clauses: Sequence[Any]) -> list[str]:
     last = len(clauses) - 1
     for i, raw in enumerate(clauses):
         clause = _clause_fields(raw, i + 1)
-        # Separator characters would splice into Primo's clause syntax.
-        value = _CLAUSE_SEPARATOR_CHARS_RE.sub(" ", str(clause.get("value") or ""))
-        value = " ".join(value.split())
+        value = clean_query_value(str(clause.get("value") or ""))
         if not value:
             raise ValueError(f"Clause {i + 1} has an empty value.")
         field = normalise_search_field(str(clause.get("field") or "any"))

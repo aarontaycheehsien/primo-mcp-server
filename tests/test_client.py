@@ -157,6 +157,22 @@ class TestSearchRequestFilters:
         assert params["sortby"] == "date"
         assert params["qInclude"] == "facet_rtype,exact,books"
 
+    async def test_plain_query_strips_clause_separators(self):
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return _empty_response()
+
+        async with httpx.AsyncClient(
+            base_url="https://example.test/primaws/rest/pub",
+            transport=httpx.MockTransport(handler),
+        ) as http_client:
+            client = PrimoClient(http_client, _config())
+            await client.search("inflation;  monetary, policy")
+
+        assert requests[0].url.params["q"] == "any,contains,inflation monetary policy"
+
     async def test_search_uses_documented_date_range_facet(self):
         requests: list[httpx.Request] = []
 
@@ -613,6 +629,33 @@ class TestSearchFacets:
             ("rtype", 42)
         ]
 
+    async def test_concurrent_searches_do_not_interleave_with_facets(self):
+        """/facets reads the session's last search, so pairs must not mix."""
+        import asyncio
+
+        order: list[str] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            order.append(f"{request.url.path.rsplit('/', 1)[-1]}:{request.url.params['q']}")
+            await asyncio.sleep(0)
+            if request.url.path.endswith("/facets"):
+                return httpx.Response(200, json=_FACETS_PAYLOAD)
+            return httpx.Response(200, json=_search_payload())
+
+        async with httpx.AsyncClient(
+            base_url="https://example.test/primaws/rest/pub",
+            transport=httpx.MockTransport(handler),
+        ) as http_client:
+            client = PrimoClient(http_client, _config())
+            await asyncio.gather(client.search("alpha"), client.search("beta"))
+
+        assert order in (
+            ["pnxs:any,contains,alpha", "facets:any,contains,alpha",
+             "pnxs:any,contains,beta", "facets:any,contains,beta"],
+            ["pnxs:any,contains,beta", "facets:any,contains,beta",
+             "pnxs:any,contains,alpha", "facets:any,contains,alpha"],
+        )
+
     async def test_facets_failure_degrades_to_no_facets(self):
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path.endswith("/facets"):
@@ -998,6 +1041,22 @@ class TestTransientRetries:
             calls.append(1)
             if len(calls) == 1:
                 raise httpx.ReadTimeout("slow", request=request)
+            return _empty_response()
+
+        response = await self._run_search(handler)
+
+        assert len(calls) == 2
+        assert delays == [0.5]
+        assert response.total_results == 0
+
+    async def test_mid_request_connection_reset_is_retried(self, monkeypatch):
+        delays = self._sleep_recorder(monkeypatch)
+        calls: list[int] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            if len(calls) == 1:
+                raise httpx.ReadError("reset", request=request)
             return _empty_response()
 
         response = await self._run_search(handler)

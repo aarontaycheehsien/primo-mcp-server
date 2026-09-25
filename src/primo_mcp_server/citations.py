@@ -63,7 +63,9 @@ def _authors_chicago(creators: list[str]) -> str:
         return "Unknown author"
     if len(formatted) == 1:
         return formatted[0]
-    if len(formatted) <= 3:
+    if len(formatted) == 2:
+        return f"{formatted[0]} and {formatted[1]}"
+    if len(formatted) == 3:
         return ", ".join(formatted[:-1]) + ", and " + formatted[-1]
     return formatted[0] + " et al."
 
@@ -239,12 +241,12 @@ def _cite_article_ieee(r: PrimoRecord) -> str:
     authors_list = _authors_ieee(r.display_authors)
     if not authors_list:
         authors_str = "Unknown author"
-    elif len(authors_list) <= 3:
-        authors_str = ", ".join(authors_list[:-1])
-        if len(authors_list) > 1:
-            authors_str += ", and " + authors_list[-1]
-        else:
-            authors_str = authors_list[0]
+    elif len(authors_list) == 1:
+        authors_str = authors_list[0]
+    elif len(authors_list) == 2:
+        authors_str = f"{authors_list[0]} and {authors_list[1]}"
+    elif len(authors_list) == 3:
+        authors_str = ", ".join(authors_list[:-1]) + ", and " + authors_list[-1]
     else:
         authors_str = authors_list[0] + " et al."
 
@@ -345,6 +347,18 @@ _STYLE_MAP = {
     "ieee": {"article": _cite_article_ieee, "book": _cite_book_ieee},
     "vancouver": {"article": _cite_article_vancouver, "book": _cite_book_vancouver},
 }
+
+CITATION_STYLES = tuple(_STYLE_MAP)
+
+
+def invalid_style_message(style: str) -> str | None:
+    """Caller-facing error for an unsupported style, or None when valid."""
+    if style.strip().lower() in _STYLE_MAP:
+        return None
+    return (
+        f'Invalid citation style "{style}". '
+        f"Use one of: {', '.join(sorted(CITATION_STYLES))}"
+    )
 
 
 def _record_type_key(resource_type: str) -> str:

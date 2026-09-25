@@ -18,6 +18,7 @@ from primo_mcp_server.query import (
     normalise_search_field,
     normalise_sort_by,
     query_clause_parts,
+    single_query,
 )
 
 if TYPE_CHECKING:
@@ -217,7 +218,7 @@ def build_search_url(
     query_params: list[tuple[str, str]] = (
         [("query", part) for part in clause_parts] + [("mode", "advanced")]
         if clause_parts
-        else [("query", f"{field},contains,{query}")]
+        else [("query", single_query(field, query))]
     )
     params: list[tuple[str, str]] = [
         *query_params,
@@ -258,9 +259,9 @@ def search_query_label(
     try:
         if clauses:
             return ";".join(query_clause_parts(clauses))
-        return f"{normalise_search_field(field)},contains,{query}"
+        return single_query(normalise_search_field(field), query)
     except ValueError:
-        return f"{field},contains,{query}"
+        return single_query(field, query)
 
 
 def _format_query_links(

@@ -6,7 +6,8 @@ import asyncio
 import base64
 import json
 import time
-from typing import Any
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator
 from urllib.parse import quote
 
 import httpx
@@ -22,6 +23,7 @@ from primo_mcp_server.query import (
     normalise_scope,
     normalise_search_field,
     normalise_sort_by,
+    single_query,
 )
 
 
@@ -98,6 +100,47 @@ def _compile_facet_filters(
     return _normalise_parameter(compile_facet_filters, filters, label)
 
 
+class _SearchSessionGate:
+    """Shared/exclusive gate over the cookie session's "last search".
+
+    Primo's /facets answers for whichever /pnxs search the shared cookie
+    session ran last. A search that fetches facets holds the gate
+    exclusively across its /pnxs + /facets pair; every other /pnxs call
+    holds it shared, so those still overlap with each other.
+    """
+
+    def __init__(self) -> None:
+        self._cond = asyncio.Condition()
+        self._shared = 0
+        self._exclusive = False
+
+    @asynccontextmanager
+    async def shared(self) -> AsyncIterator[None]:
+        async with self._cond:
+            await self._cond.wait_for(lambda: not self._exclusive)
+            self._shared += 1
+        try:
+            yield
+        finally:
+            async with self._cond:
+                self._shared -= 1
+                self._cond.notify_all()
+
+    @asynccontextmanager
+    async def exclusive(self) -> AsyncIterator[None]:
+        async with self._cond:
+            await self._cond.wait_for(
+                lambda: not self._exclusive and self._shared == 0
+            )
+            self._exclusive = True
+        try:
+            yield
+        finally:
+            async with self._cond:
+                self._exclusive = False
+                self._cond.notify_all()
+
+
 class PrimoClient:
     """Async client for the Ex Libris Primo public API."""
 
@@ -107,6 +150,7 @@ class PrimoClient:
         self._guest_jwt_token: str | None = None
         self._guest_jwt_expiry: float = 0.0
         self._guest_jwt_lock = asyncio.Lock()
+        self._search_gate = _SearchSessionGate()
 
     # -- Guest JWT handling -------------------------------------------------
     #
@@ -259,7 +303,7 @@ class PrimoClient:
         q_value = (
             _compile_query_clauses(clauses)
             if clauses
-            else f"{field},contains,{query}"
+            else single_query(field, query)
         )
 
         # Resolve scope to tab + scope params
@@ -302,13 +346,14 @@ class PrimoClient:
         if q_exclude:
             params["qExclude"] = "|,|".join(q_exclude)
 
-        data = await self._get("/pnxs", params=params)
-        response = SearchResponse.from_api_response(data)
-
         if include_facets is None:
             include_facets = cfg.search_facets
-        if include_facets and response.records:
-            response.facets = await self._fetch_facets(params)
+        gate = self._search_gate.exclusive if include_facets else self._search_gate.shared
+        async with gate():
+            data = await self._get("/pnxs", params=params)
+            response = SearchResponse.from_api_response(data)
+            if include_facets and response.records:
+                response.facets = await self._fetch_facets(params)
         return response
 
     async def _fetch_facets(self, params: dict[str, Any]) -> list[Facet]:
@@ -357,7 +402,8 @@ class PrimoClient:
                 "limit": "5",
                 "lang": self._config.language,
             }
-            data = await self._get("/pnxs", params=params)
+            async with self._search_gate.shared():
+                data = await self._get("/pnxs", params=params)
             response = SearchResponse.from_api_response(data)
 
             for record in response.records:
@@ -564,6 +610,14 @@ class PrimoClient:
             raise PrimoAPIError(
                 f"Could not connect to {self._config.base_url}. "
                 "Check your network connection and that the Primo API is available.",
+                transient=True,
+            ) from e
+        except (httpx.NetworkError, httpx.RemoteProtocolError) as e:
+            # A pooled keep-alive connection reset mid-request surfaces here
+            # (ReadError, RemoteProtocolError), not as ConnectError.
+            raise PrimoAPIError(
+                f"Connection to {self._config.base_url} failed mid-request "
+                f"({type(e).__name__}). Try again shortly.",
                 transient=True,
             ) from e
         except httpx.HTTPStatusError as e:

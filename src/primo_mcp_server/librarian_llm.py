@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from typing import Awaitable, Callable, NamedTuple, Sequence
 
@@ -322,7 +323,9 @@ def validate_choices(
             confidence = float(choice.get("confidence", 0.0))
         except (TypeError, ValueError):
             continue
-        if confidence < config.librarian_llm_min_confidence:
+        # NaN compares False against the floor, so it must be rejected
+        # explicitly or it would pass as a validated choice.
+        if math.isnan(confidence) or confidence < config.librarian_llm_min_confidence:
             continue
         reason = str(choice.get("reason", "")).strip()[:_MAX_REASON_CHARS]
         if not reason:
